@@ -137,6 +137,8 @@ def load_config() -> dict:
             "temperature": float(_env("CONCLAVE_TEMPERATURE", env_file, "0.7")),
             "max_tokens": int(_env("CONCLAVE_MAX_TOKENS", env_file, "2048")),
             "timeout_seconds": int(_env("CONCLAVE_TIMEOUT", env_file, "120")),
+            "max_retries": int(_env("CONCLAVE_MAX_RETRIES", env_file, "3")),
+            "retry_base_delay": float(_env("CONCLAVE_RETRY_BASE_DELAY", env_file, "1.0")),
         },
         "anonymize_reviews": _env("CONCLAVE_ANONYMIZE", env_file, "true").lower() == "true",
     }
@@ -184,12 +186,31 @@ def load_templates() -> dict:
 # HTTP helper
 # ──────────────────────────────────────────────────────────────
 
-async def _post(url: str, headers: dict, body: dict, timeout: int = 120) -> dict:
+async def _post(url: str, headers: dict, body: dict, timeout: int = 120,
+                max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
     import httpx
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=body)
-        resp.raise_for_status()
-        return resp.json()
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, headers=headers, json=body)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                last_exc = e
+                delay = retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                await asyncio.sleep(delay)
+                continue
+            raise
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                delay = retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                await asyncio.sleep(delay)
+                continue
+            raise
+    raise last_exc  # unreachable, but satisfies type checker
 
 
 # ──────────────────────────────────────────────────────────────
@@ -197,7 +218,8 @@ async def _post(url: str, headers: dict, body: dict, timeout: int = 120) -> dict
 # ──────────────────────────────────────────────────────────────
 
 async def _call_anthropic(prompt: str, model: str, system: Optional[str],
-                          api_key: str, temp: float, max_tok: int, timeout: int) -> dict:
+                          api_key: str, temp: float, max_tok: int, timeout: int,
+                          max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
     body: dict = {
         "model": model, "max_tokens": max_tok, "temperature": temp,
         "messages": [{"role": "user", "content": prompt}],
@@ -207,7 +229,7 @@ async def _call_anthropic(prompt: str, model: str, system: Optional[str],
     data = await _post("https://api.anthropic.com/v1/messages", {
         "x-api-key": api_key, "anthropic-version": "2023-06-01",
         "content-type": "application/json",
-    }, body, timeout)
+    }, body, timeout, max_retries, retry_base_delay)
     text = "\n".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
     usage = data.get("usage", {})
     return {"content": text, "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
@@ -215,7 +237,8 @@ async def _call_anthropic(prompt: str, model: str, system: Optional[str],
 
 
 async def _call_gemini(prompt: str, model: str, system: Optional[str],
-                       api_key: str, temp: float, max_tok: int, timeout: int) -> dict:
+                       api_key: str, temp: float, max_tok: int, timeout: int,
+                       max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     body: dict = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -223,7 +246,8 @@ async def _call_gemini(prompt: str, model: str, system: Optional[str],
     }
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
-    data = await _post(url, {"content-type": "application/json"}, body, timeout)
+    data = await _post(url, {"content-type": "application/json"}, body, timeout,
+                       max_retries, retry_base_delay)
     candidates = data.get("candidates", [])
     text = ""
     if candidates:
@@ -233,7 +257,8 @@ async def _call_gemini(prompt: str, model: str, system: Optional[str],
 
 
 async def _call_openai(prompt: str, model: str, system: Optional[str],
-                       api_key: str, temp: float, max_tok: int, timeout: int) -> dict:
+                       api_key: str, temp: float, max_tok: int, timeout: int,
+                       max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -250,7 +275,7 @@ async def _call_openai(prompt: str, model: str, system: Optional[str],
 
     data = await _post("https://api.openai.com/v1/chat/completions", {
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
-    }, body, timeout)
+    }, body, timeout, max_retries, retry_base_delay)
     choices = data.get("choices", [])
     text = choices[0]["message"]["content"] if choices else ""
     tokens = data.get("usage", {}).get("total_tokens")
@@ -258,14 +283,16 @@ async def _call_openai(prompt: str, model: str, system: Optional[str],
 
 
 async def _call_openrouter(prompt: str, model: str, system: Optional[str],
-                           api_key: str, temp: float, max_tok: int, timeout: int) -> dict:
+                           api_key: str, temp: float, max_tok: int, timeout: int,
+                           max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
     data = await _post("https://openrouter.ai/api/v1/chat/completions", {
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
-    }, {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tok}, timeout)
+    }, {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tok},
+        timeout, max_retries, retry_base_delay)
     choices = data.get("choices", [])
     text = choices[0]["message"]["content"] if choices else ""
     tokens = data.get("usage", {}).get("total_tokens")
@@ -299,6 +326,8 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
     temp = defaults.get("temperature", 0.7)
     max_tok = defaults.get("max_tokens", 2048)
     timeout = defaults.get("timeout_seconds", 120)
+    max_retries = defaults.get("max_retries", 3)
+    retry_base_delay = defaults.get("retry_base_delay", 1.0)
     key = member["key"]
     provider = member.get("provider", key)
 
@@ -309,7 +338,8 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
             if not api_key:
                 return {"error": "OPENROUTER_API_KEY not set", "elapsed": 0}
             model_id = member.get("openrouter_model", "")
-            result = await _call_openrouter(prompt, model_id, system, api_key, temp, max_tok, timeout)
+            result = await _call_openrouter(prompt, model_id, system, api_key, temp, max_tok,
+                                            timeout, max_retries, retry_base_delay)
         else:
             # Map provider to direct caller
             caller_map = {
@@ -323,7 +353,8 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
                 api_key = cfg.get("openrouter", {}).get("api_key", "")
                 if api_key:
                     result = await _call_openrouter(prompt, member.get("openrouter_model", ""),
-                                                    system, api_key, temp, max_tok, timeout)
+                                                    system, api_key, temp, max_tok, timeout,
+                                                    max_retries, retry_base_delay)
                 else:
                     return {"error": f"No caller for provider '{provider}' and no OpenRouter key",
                             "elapsed": 0}
@@ -332,7 +363,8 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
                 if not api_key:
                     return {"error": f"API key for {provider} not set", "elapsed": 0}
                 model_id = member.get("direct_model", "")
-                result = await caller_fn(prompt, model_id, system, api_key, temp, max_tok, timeout)
+                result = await caller_fn(prompt, model_id, system, api_key, temp, max_tok,
+                                         timeout, max_retries, retry_base_delay)
 
         result["elapsed"] = round(time.time() - start, 2)
         return result
