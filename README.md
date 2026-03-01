@@ -288,6 +288,21 @@ CONCLAVE_TIMEOUT=120            # per-request timeout in seconds (default: 120)
 
 Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thundering herd.
 
+## Testing
+
+68 tests with zero API calls (all external calls mocked):
+
+```bash
+pip install pytest httpx    # one-time setup
+python3 -m pytest tests/ -v
+```
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `test_ranking.py` | 27 | `parse_ranking` (numbered, arrows, comma, standalone, headers, edge cases), `aggregate_rankings`, `build_critique_prompt` |
+| `test_providers.py` | 18 | `_post` retry logic (429/5xx, timeout, connect errors, non-retryable 4xx), `call_model` routing (local placeholder, missing keys, provider dispatch) |
+| `test_orchestrator.py` | 14 | `phase1`, `phase2` (critiques, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure), `doctor` |
+
 ## CLI Reference
 
 ```
@@ -326,6 +341,11 @@ conclave/
 │       ├── cost.py         ← Pricing data and cost estimation
 │       ├── orchestrator.py ← Phase 1/2 orchestration, run_conclave, doctor
 │       └── cli.py          ← argparse, pretty printing, main()
+├── tests/
+│   ├── conftest.py         ← sys.path setup for imports
+│   ├── test_ranking.py     ← Ranking parser, aggregation, critique prompts (27 tests)
+│   ├── test_providers.py   ← HTTP retry logic, call_model routing (18 tests)
+│   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor (14 tests)
 └── README.md
 
 ~/.config/conclave/
@@ -365,6 +385,7 @@ PRs welcome! Ideas:
 - [x] Robust ranking parser (regex + structured prompts)
 - [x] Multi-turn conversation memory (`--session`)
 - [x] Modular package architecture (config, providers, ranking, sessions, cost, orchestrator, cli)
+- [x] Test suite — ranking parser, retry logic, phase orchestration (68 tests, pytest)
 - [ ] Web UI for visualizing debates
 - [ ] Export debate transcripts to Markdown
 - [ ] Token budget management (auto-truncate long sessions)
