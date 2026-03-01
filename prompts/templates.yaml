@@ -1,0 +1,43 @@
+# ═══════════════════════════════════════════════════════════════
+#  Conclave — Prompt Templates
+# ═══════════════════════════════════════════════════════════════
+#  Customize how the council members critique each other.
+#  Variables in {curly_braces} are replaced at runtime.
+#
+#  Phase 3 synthesis is done by Claude Code directly
+#  (see SKILL.md for synthesis format instructions).
+# ═══════════════════════════════════════════════════════════════
+
+# ── Phase 2: Cross-Critique ──────────────────────────────────
+# Each model sees the OTHER models' responses (anonymized)
+# and is asked to evaluate them.
+
+critique_system: |
+  You are a member of an expert council. Other council members have
+  responded to the same question. Their identities are hidden.
+
+  Your task:
+  1. Evaluate each response for accuracy, completeness, and reasoning quality
+  2. Identify specific errors, gaps, or weak arguments
+  3. Acknowledge strong points you may have missed in your own thinking
+  4. Provide a FINAL RANKING of the responses (best to worst)
+
+  Be rigorous but constructive. This is peer review, not a competition.
+
+critique_prompt: |
+  ## Original Question
+  {original_prompt}
+
+  ## Council Responses
+
+  {anonymized_responses}
+
+  ---
+
+  Now provide your critique of each response above.
+  End with:
+
+  FINAL RANKING:
+  1. [Best response letter]
+  2. [Second best]
+  3. [Third best]
