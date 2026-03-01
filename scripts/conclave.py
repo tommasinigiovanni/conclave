@@ -183,6 +183,42 @@ def load_templates() -> dict:
 
 
 # ──────────────────────────────────────────────────────────────
+# Progress reporting (stderr)
+# ──────────────────────────────────────────────────────────────
+
+class _Progress:
+    """Emits real-time progress to stderr so stdout JSON stays clean."""
+
+    def __init__(self, quiet: bool = False):
+        self._quiet = quiet
+
+    def _emit(self, msg: str):
+        if not self._quiet:
+            print(msg, file=sys.stderr, flush=True)
+
+    def header(self, depth: str, member_count: int):
+        emoji = {"quick": "⚡", "standard": "🏛️", "deep": "🔥"}.get(depth, "🏛️")
+        self._emit(f"{emoji} Conclave — {depth} · {member_count} members")
+
+    def phase_start(self, phase: int, label: str):
+        self._emit(f"  Phase {phase} — {label}")
+
+    def member_done(self, member: dict, result: dict):
+        icon = member.get("icon", "⚪")
+        label = member.get("label", member.get("key", "?"))
+        if "error" in result:
+            self._emit(f"    ❌ {icon} {label} — {result['error'][:60]}")
+        elif result.get("needs_claude_code"):
+            self._emit(f"    🏠 {icon} {label} — local (Claude Code)")
+        else:
+            elapsed = result.get("elapsed", "?")
+            self._emit(f"    ✅ {icon} {label} — {elapsed}s")
+
+    def done(self, total_seconds: float):
+        self._emit(f"  Done in {total_seconds}s")
+
+
+# ──────────────────────────────────────────────────────────────
 # HTTP helper
 # ──────────────────────────────────────────────────────────────
 
@@ -376,14 +412,17 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
 # Phase 1: Parallel independent drafts
 # ──────────────────────────────────────────────────────────────
 
-async def phase1(prompt: str, system: Optional[str], members: list, cfg: dict) -> list:
-    tasks = [call_model(m, prompt, system, cfg) for m in members]
-    results = await asyncio.gather(*tasks)
-    for m, r in zip(members, results):
-        r["key"] = m["key"]
-        r["label"] = m["label"]
-        r["icon"] = m.get("icon", "")
-    return list(results)
+async def phase1(prompt: str, system: Optional[str], members: list, cfg: dict,
+                  progress: _Progress) -> list:
+    async def _call_and_report(m):
+        result = await call_model(m, prompt, system, cfg)
+        result["key"] = m["key"]
+        result["label"] = m["label"]
+        result["icon"] = m.get("icon", "")
+        progress.member_done(m, result)
+        return result
+
+    return list(await asyncio.gather(*[_call_and_report(m) for m in members]))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -455,7 +494,7 @@ def aggregate_rankings(critiques: list) -> dict:
 
 
 async def phase2(original_prompt: str, drafts: list, members: list,
-                 cfg: dict, templates: dict) -> list:
+                 cfg: dict, templates: dict, progress: _Progress) -> list:
     """Anonymized cross-critique with ranking."""
     anonymize = cfg.get("anonymize_reviews", True)
     system = templates.get("critique_system", "You are a peer reviewer in an expert council.")
@@ -464,26 +503,25 @@ async def phase2(original_prompt: str, drafts: list, members: list,
     if len(ok_drafts) < 2:
         return []
 
+    async def _critique_and_report(member, prompt_text, meta_info):
+        result = await call_model(member, prompt_text, system, cfg)
+        result.update(meta_info)
+        if "error" not in result and "content" in result:
+            result["ranking"] = parse_ranking(result["content"])
+        progress.member_done(meta_info, result)
+        return result
+
     tasks = []
-    meta = []
     for m in members:
         if any(d["key"] == m["key"] and "error" in d for d in drafts):
             continue
         prompt_text, letter_map = build_critique_prompt(
             original_prompt, drafts, m["key"], anonymize, templates)
-        tasks.append(call_model(m, prompt_text, system, cfg))
-        meta.append({"key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
-                      "letter_map": letter_map})
+        meta_info = {"key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                     "letter_map": letter_map}
+        tasks.append(_critique_and_report(m, prompt_text, meta_info))
 
-    results = await asyncio.gather(*tasks)
-    critiques = []
-    for r, m in zip(results, meta):
-        r.update(m)
-        if "error" not in r and "content" in r:
-            r["ranking"] = parse_ranking(r["content"])
-        critiques.append(r)
-
-    return critiques
+    return list(await asyncio.gather(*tasks))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -517,17 +555,22 @@ async def doctor(cfg: dict) -> list[dict]:
 async def run_conclave(prompt: str, depth: str = "standard",
                        system: Optional[str] = None,
                        member_keys: Optional[list[str]] = None,
-                       cfg: Optional[dict] = None) -> dict:
+                       cfg: Optional[dict] = None,
+                       quiet: bool = False) -> dict:
     cfg = cfg or load_config()
     templates = load_templates()
+    progress = _Progress(quiet=quiet)
     total_start = time.time()
 
     members = cfg.get("council_members", [])
     if member_keys:
         members = [m for m in members if m["key"] in member_keys]
 
+    progress.header(depth, len(members))
+
     # ── Phase 1 ──
-    drafts = await phase1(prompt, system, members, cfg)
+    progress.phase_start(1, "Independent drafts...")
+    drafts = await phase1(prompt, system, members, cfg, progress)
     local_count = sum(1 for d in drafts if d.get("needs_claude_code", False))
     api_ok_count = sum(1 for d in drafts if "error" not in d and not d.get("needs_claude_code", False))
     fail_count = sum(1 for d in drafts if "error" in d)
@@ -537,14 +580,18 @@ async def run_conclave(prompt: str, depth: str = "standard",
     rankings = {}
     # Need at least 2 members with content (API responses) for cross-critique
     if depth == "deep" and (api_ok_count + local_count) >= 2:
-        critiques = await phase2(prompt, drafts, members, cfg, templates)
+        progress.phase_start(2, "Anonymized cross-critique...")
+        critiques = await phase2(prompt, drafts, members, cfg, templates, progress)
         rankings = aggregate_rankings(critiques)
+
+    total_elapsed = round(time.time() - total_start, 2)
+    progress.done(total_elapsed)
 
     output = {
         "prompt": prompt,
         "system": system,
         "depth": depth,
-        "total_elapsed_seconds": round(time.time() - total_start, 2),
+        "total_elapsed_seconds": total_elapsed,
         "phase1_drafts": drafts,
         "phase2_critiques": critiques,
         "aggregate_rankings": rankings,
@@ -651,6 +698,7 @@ Examples:
     parser.add_argument("--members", default=None, help="Comma-separated member keys")
     parser.add_argument("--system", default=None, help="System prompt for all models")
     parser.add_argument("--raw", action="store_true", help="JSON only")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress stderr progress")
 
     args = parser.parse_args()
     cfg = load_config()
@@ -663,6 +711,7 @@ Examples:
         system=args.system,
         member_keys=member_keys,
         cfg=cfg,
+        quiet=args.quiet,
     ))
 
     if args.raw:
