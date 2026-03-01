@@ -99,12 +99,12 @@ def load_config() -> dict:
     if not members:
         members = [
             {"key": "claude", "label": "Claude", "icon": "🟣", "provider": "anthropic",
-             "direct_model": "claude-opus-4.6",
-             "openrouter_model": "anthropic/claude-opus-4.6",
+             "direct_model": "claude-sonnet-4-20250514",
+             "openrouter_model": "anthropic/claude-sonnet-4-20250514",
              "local": True},
             {"key": "gemini", "label": "Gemini", "icon": "🔵", "provider": "google",
-             "direct_model": "gemini-3.1-pro-preview",
-             "openrouter_model": "google/gemini-3.1-pro-preview",
+             "direct_model": "gemini-2.0-flash",
+             "openrouter_model": "google/gemini-2.0-flash",
              "local": False},
             {"key": "gpt", "label": "GPT", "icon": "🟢", "provider": "openai",
              "direct_model": "gpt-5.2",
@@ -237,9 +237,19 @@ async def _call_openai(prompt: str, model: str, system: Optional[str],
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+
+    # Reasoning models (gpt-5.x, o1, o3, o4) don't accept temperature/max_tokens
+    is_reasoning = any(model.startswith(p) for p in ("gpt-5", "o1", "o3", "o4"))
+    body: dict = {"model": model, "messages": messages}
+    if is_reasoning:
+        body["max_completion_tokens"] = max_tok
+    else:
+        body["temperature"] = temp
+        body["max_tokens"] = max_tok
+
     data = await _post("https://api.openai.com/v1/chat/completions", {
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
-    }, {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tok}, timeout)
+    }, body, timeout)
     choices = data.get("choices", [])
     text = choices[0]["message"]["content"] if choices else ""
     tokens = data.get("usage", {}).get("total_tokens")
