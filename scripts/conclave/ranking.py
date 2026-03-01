@@ -1,5 +1,6 @@
 """Ranking extraction, aggregation, and critique prompt building."""
 
+import json
 import random
 import re
 import string
@@ -135,3 +136,95 @@ def aggregate_rankings(critiques: list) -> dict:
     for key, positions in scores.items():
         averages[key] = round(sum(positions) / len(positions), 2)
     return dict(sorted(averages.items(), key=lambda x: x[1]))
+
+
+# ── JSON-based ranking extraction ────────────────────────────────
+
+# Fenced ```json block
+_FENCED_JSON_RE = re.compile(
+    r'```json\s*\n(.*?)```',
+    re.DOTALL,
+)
+
+# Bare JSON object containing "ranking"
+_BARE_JSON_RE = re.compile(
+    r'\{[^{}]*"ranking"[^{}]*\}',
+    re.DOTALL,
+)
+
+
+def extract_json_ranking(text: str) -> dict | None:
+    """Find {"ranking": [...]} in text via fenced ```json block or bare {…}.
+
+    Returns the parsed dict or None if nothing valid found.
+    """
+    # Strategy 1: fenced ```json block
+    for m in _FENCED_JSON_RE.finditer(text):
+        try:
+            obj = json.loads(m.group(1).strip())
+            if isinstance(obj, dict) and "ranking" in obj:
+                return obj
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Strategy 2: last bare {…} containing "ranking"
+    matches = _BARE_JSON_RE.findall(text)
+    for candidate in reversed(matches):
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict) and "ranking" in obj:
+                return obj
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    return None
+
+
+def validate_ranking(obj: dict, valid_letters: set[str]) -> list[str] | None:
+    """Validate structure: list of >=2 unique single uppercase letters in valid_letters.
+
+    Strips whitespace and uppercases tolerantly. Returns cleaned list or None.
+    """
+    if not isinstance(obj, dict):
+        return None
+    ranking = obj.get("ranking")
+    if not isinstance(ranking, list):
+        return None
+
+    cleaned = []
+    seen: set[str] = set()
+    for item in ranking:
+        if not isinstance(item, str):
+            return None
+        letter = item.strip().upper()
+        if len(letter) != 1 or letter not in valid_letters:
+            return None
+        if letter not in seen:
+            seen.add(letter)
+            cleaned.append(letter)
+
+    if len(cleaned) < 2:
+        return None
+    return cleaned
+
+
+def parse_ranking_json(text: str, valid_letters: set[str]) -> list[str]:
+    """Extract + validate JSON ranking from text. Returns [] on failure."""
+    obj = extract_json_ranking(text)
+    if obj is None:
+        return []
+    result = validate_ranking(obj, valid_letters)
+    return result if result is not None else []
+
+
+def build_repair_prompt(valid_letters: set[str]) -> str:
+    """Short prompt asking the model to return ONLY the JSON ranking object."""
+    sorted_letters = sorted(valid_letters)
+    example = json.dumps({"ranking": sorted_letters})
+    return (
+        "Your previous response did not include a valid JSON ranking.\n"
+        "Please reply with ONLY a JSON object ranking the responses "
+        f"using these letters: {', '.join(sorted_letters)}.\n\n"
+        f"Example: {example}\n\n"
+        "Best response first. Return ONLY the JSON, nothing else."
+    )

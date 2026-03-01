@@ -133,24 +133,22 @@ def load_templates() -> dict:
             "3. Acknowledge strong points you may have missed in your own thinking\n"
             "4. Provide a FINAL RANKING of the responses (best to worst)\n\n"
             "Be rigorous but constructive. This is peer review, not a competition.\n\n"
-            "IMPORTANT: End your response with a ranking block in exactly this format:\n"
-            "FINAL RANKING:\n"
-            "1. A\n"
-            "2. B\n"
-            "3. C\n"
-            "Use ONLY the single response letter on each line (A, B, C, etc.), "
-            "best first. Do NOT add explanations on the ranking lines."
+            "IMPORTANT: End your response with a ranking in this JSON format:\n"
+            "```json\n"
+            '{"ranking": ["A", "B", "C"]}\n'
+            "```\n"
+            "Use ONLY the single response letters (A, B, C, etc.), "
+            "best first. The JSON block must be valid JSON."
         ),
         "critique_prompt": (
             "## Original Question\n{original_prompt}\n\n"
             "## Council Responses\n\n{anonymized_responses}\n\n---\n\n"
             "Now provide your critique of each response above.\n"
-            "End with your ranking in exactly this format:\n\n"
-            "FINAL RANKING:\n"
-            "1. A\n"
-            "2. B\n"
-            "3. C\n\n"
-            "(Use only the single response letter per line, best to worst.)"
+            "End with your ranking in this JSON format:\n\n"
+            "```json\n"
+            '{{"ranking": ["A", "B", "C"]}}\n'
+            "```\n\n"
+            "(Use only the single response letters, best to worst.)"
         ),
     }
     try:

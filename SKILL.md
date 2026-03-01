@@ -70,12 +70,10 @@ In deep mode, `phase2_critiques` will also have `needs_claude_code: true` entrie
 Each includes a `prompt` field with anonymized responses ("Response A", "Response B").
 
 Read them and provide your critique + ranking. End with:
+```json
+{"ranking": ["A", "B", "C"]}
 ```
-FINAL RANKING:
-1. Response [best letter]
-2. Response [second]
-3. Response [third]
-```
+Use only the single response letters, best first.
 
 ### Step 5: Synthesize the final answer
 

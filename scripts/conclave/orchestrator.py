@@ -7,7 +7,10 @@ from typing import Optional
 from .config import load_config, load_templates
 from .progress import _Progress
 from .providers import call_model
-from .ranking import aggregate_rankings, build_critique_prompt, parse_ranking
+from .ranking import (
+    aggregate_rankings, build_critique_prompt, build_repair_prompt,
+    parse_ranking, parse_ranking_json,
+)
 from .sessions import _SessionStore, _build_context_prompt, _record_turn
 
 
@@ -55,10 +58,35 @@ async def phase2(original_prompt: str, drafts: list, members: list,
         return []
 
     async def _critique_and_report(member, prompt_text, meta_info):
+        valid_letters = set(meta_info["letter_map"].keys())
         result = await call_model(member, prompt_text, system, cfg)
         result.update(meta_info)
+        result["ranking_reprompted"] = False
+
         if "error" not in result and "content" in result:
-            result["ranking"] = parse_ranking(result["content"])
+            content = result["content"]
+
+            # 1. Try JSON extraction on initial response
+            ranking = parse_ranking_json(content, valid_letters)
+
+            # 2. If empty: repair prompt → try JSON on repair response
+            repair_text = ""
+            if not ranking:
+                repair_msg = build_repair_prompt(valid_letters)
+                repair_result = await call_model(member, repair_msg, system, cfg)
+                result["ranking_reprompted"] = True
+                if "error" not in repair_result and "content" in repair_result:
+                    repair_text = repair_result["content"]
+                    ranking = parse_ranking_json(repair_text, valid_letters)
+
+            # 3. If still empty: regex fallback on original, then repair
+            if not ranking:
+                ranking = parse_ranking(content)
+            if not ranking and repair_text:
+                ranking = parse_ranking(repair_text)
+
+            result["ranking"] = ranking
+
         progress.member_done(meta_info, result)
         return result
 

@@ -122,9 +122,7 @@ class TestPhase2:
 
         critique_text = (
             "Good analysis.\n\n"
-            "FINAL RANKING:\n"
-            "1. A\n"
-            "2. B\n"
+            '```json\n{"ranking": ["A", "B"]}\n```\n'
         )
 
         async def fake_call(member, prompt, system, cfg):
@@ -139,6 +137,66 @@ class TestPhase2:
             assert "ranking" in c
             assert "letter_map" in c
             assert c["ranking"] == ["A", "B"]
+            assert c["ranking_reprompted"] is False
+
+    def test_reprompts_on_json_failure(self, members, cfg, templates, quiet_progress):
+        """Initial response has no JSON → repair prompt succeeds → ranking_reprompted=True."""
+        drafts = [
+            {"key": "claude", "label": "Claude", "content": "Claude answer"},
+            {"key": "gemini", "label": "Gemini", "content": "Gemini answer"},
+            {"key": "gpt",    "label": "GPT",    "content": "GPT answer"},
+        ]
+
+        call_count = 0
+        async def fake_call(member, prompt, system, cfg):
+            nonlocal call_count
+            call_count += 1
+            # Odd calls = initial critique (no JSON), even calls = repair (with JSON)
+            if call_count % 2 == 1:
+                return {"content": "Good analysis but no JSON ranking here.",
+                        "tokens": 50, "model": "test", "elapsed": 1.0}
+            else:
+                return {"content": '{"ranking": ["A", "B"]}',
+                        "tokens": 10, "model": "test", "elapsed": 0.5}
+
+        with patch("conclave.orchestrator.call_model", side_effect=fake_call):
+            critiques = asyncio.run(
+                phase2("original q", drafts, members, cfg, templates, quiet_progress))
+
+        assert len(critiques) == 3
+        for c in critiques:
+            assert c["ranking"] == ["A", "B"]
+            assert c["ranking_reprompted"] is True
+
+    def test_regex_fallback_after_reprompt_failure(self, members, cfg, templates, quiet_progress):
+        """Both JSON attempts fail → regex on original works."""
+        drafts = [
+            {"key": "claude", "label": "Claude", "content": "Claude answer"},
+            {"key": "gemini", "label": "Gemini", "content": "Gemini answer"},
+            {"key": "gpt",    "label": "GPT",    "content": "GPT answer"},
+        ]
+
+        call_count = 0
+        async def fake_call(member, prompt, system, cfg):
+            nonlocal call_count
+            call_count += 1
+            if call_count % 2 == 1:
+                # Initial: has regex ranking but no JSON
+                return {"content": "Analysis.\n\nFINAL RANKING:\n1. B\n2. A\n",
+                        "tokens": 50, "model": "test", "elapsed": 1.0}
+            else:
+                # Repair: also no valid JSON
+                return {"content": "Sorry, here: B, A",
+                        "tokens": 10, "model": "test", "elapsed": 0.5}
+
+        with patch("conclave.orchestrator.call_model", side_effect=fake_call):
+            critiques = asyncio.run(
+                phase2("original q", drafts, members, cfg, templates, quiet_progress))
+
+        assert len(critiques) == 3
+        for c in critiques:
+            assert c["ranking"] == ["B", "A"]
+            assert c["ranking_reprompted"] is True
 
     def test_skips_members_with_failed_drafts(self, members, cfg, templates, quiet_progress):
         drafts = [
@@ -147,11 +205,10 @@ class TestPhase2:
             {"key": "gpt",    "label": "GPT",    "content": "GPT answer"},
         ]
 
-        call_count = 0
         async def fake_call(member, prompt, system, cfg):
-            nonlocal call_count
-            call_count += 1
-            return {"content": "FINAL RANKING:\n1. A\n", "tokens": 10, "model": "test", "elapsed": 0.5}
+            # With only 1 other draft, valid_letters={"A"}, so return regex-parseable ranking
+            return {"content": "Analysis.\n\nFINAL RANKING:\n1. A\n",
+                    "tokens": 10, "model": "test", "elapsed": 0.5}
 
         with patch("conclave.orchestrator.call_model", side_effect=fake_call):
             critiques = asyncio.run(
@@ -159,7 +216,8 @@ class TestPhase2:
 
         # gemini had error → skipped. claude + gpt participate = 2 critiques
         assert len(critiques) == 2
-        assert call_count == 2
+        critique_keys = {c["key"] for c in critiques}
+        assert "gemini" not in critique_keys
 
     def test_returns_empty_if_fewer_than_2_ok_drafts(self, members, cfg, templates, quiet_progress):
         drafts = [
@@ -222,17 +280,18 @@ class TestRunConclave:
         async def fake_call(member, prompt, system, cfg):
             nonlocal call_count
             call_count += 1
-            if member.get("local"):
+            # Phase 1 (first 3 calls): local → placeholder, remote → content
+            if call_count <= 3 and member.get("local"):
                 return {"content": "", "needs_claude_code": True,
                         "model": "x", "tokens": None, "elapsed": 0}
-            return {"content": f"resp\n\nFINAL RANKING:\n1. A\n2. B\n",
+            return {"content": 'resp\n\n```json\n{"ranking": ["A", "B"]}\n```\n',
                     "tokens": 10, "model": "x", "elapsed": 1.0}
 
         with patch("conclave.orchestrator.call_model", side_effect=fake_call):
             result = asyncio.run(run_conclave("test", depth="deep", cfg=cfg, quiet=True))
 
         assert result["depth"] == "deep"
-        # Phase 1: 3 calls, Phase 2: 3 critiques = 6 total
+        # Phase 1: 3 calls, Phase 2: 3 critiques = 6 total (no re-prompts needed)
         assert call_count == 6
         assert len(result["phase2_critiques"]) == 3
         assert result["aggregate_rankings"]  # non-empty

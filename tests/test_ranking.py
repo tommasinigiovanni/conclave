@@ -1,4 +1,7 @@
-"""Tests for conclave.ranking — parse_ranking, aggregate_rankings, build_critique_prompt."""
+"""Tests for conclave.ranking — parse_ranking, aggregate_rankings, build_critique_prompt,
+and JSON-based ranking extraction."""
+
+import json
 
 import pytest
 
@@ -6,7 +9,11 @@ from conclave.ranking import (
     LETTERS,
     aggregate_rankings,
     build_critique_prompt,
+    build_repair_prompt,
+    extract_json_ranking,
     parse_ranking,
+    parse_ranking_json,
+    validate_ranking,
 )
 
 
@@ -249,3 +256,158 @@ class TestBuildCritiquePrompt:
             "test", drafts, "claude", anonymize=True, templates=templates)
         assert len(letter_map) == 2
         assert prompt  # non-empty
+
+
+# ── extract_json_ranking ─────────────────────────────────────────
+
+
+class TestExtractJsonRanking:
+    def test_fenced_json_block(self):
+        text = 'Some critique.\n\n```json\n{"ranking": ["A", "B", "C"]}\n```\n'
+        result = extract_json_ranking(text)
+        assert result == {"ranking": ["A", "B", "C"]}
+
+    def test_bare_json(self):
+        text = 'Here is my ranking: {"ranking": ["B", "A", "C"]}'
+        result = extract_json_ranking(text)
+        assert result == {"ranking": ["B", "A", "C"]}
+
+    def test_no_json(self):
+        text = "Just a plain text critique with no JSON at all."
+        assert extract_json_ranking(text) is None
+
+    def test_invalid_json(self):
+        text = '```json\n{"ranking": ["A", "B",]}\n```'
+        assert extract_json_ranking(text) is None
+
+    def test_json_without_ranking_key(self):
+        text = '```json\n{"scores": [1, 2, 3]}\n```'
+        assert extract_json_ranking(text) is None
+
+    def test_multiple_fenced_blocks_picks_first_with_ranking(self):
+        text = (
+            '```json\n{"other": true}\n```\n'
+            '```json\n{"ranking": ["C", "A"]}\n```\n'
+        )
+        result = extract_json_ranking(text)
+        assert result == {"ranking": ["C", "A"]}
+
+    def test_fenced_with_whitespace(self):
+        text = '```json\n  \n  {"ranking": ["A", "B"]}  \n\n```'
+        result = extract_json_ranking(text)
+        assert result == {"ranking": ["A", "B"]}
+
+    def test_bare_json_picks_last(self):
+        text = (
+            'First: {"ranking": ["A", "B"]} '
+            'Then revised: {"ranking": ["B", "A"]}'
+        )
+        result = extract_json_ranking(text)
+        assert result == {"ranking": ["B", "A"]}
+
+    def test_fenced_preferred_over_bare(self):
+        text = (
+            'Bare: {"ranking": ["X", "Y"]}\n'
+            '```json\n{"ranking": ["A", "B"]}\n```\n'
+        )
+        result = extract_json_ranking(text)
+        assert result == {"ranking": ["A", "B"]}
+
+
+# ── validate_ranking ─────────────────────────────────────────────
+
+
+class TestValidateRanking:
+    def test_valid(self):
+        obj = {"ranking": ["A", "B", "C"]}
+        result = validate_ranking(obj, {"A", "B", "C"})
+        assert result == ["A", "B", "C"]
+
+    def test_two_items(self):
+        obj = {"ranking": ["B", "A"]}
+        result = validate_ranking(obj, {"A", "B"})
+        assert result == ["B", "A"]
+
+    def test_missing_key(self):
+        obj = {"scores": [1, 2]}
+        assert validate_ranking(obj, {"A", "B"}) is None
+
+    def test_non_list(self):
+        obj = {"ranking": "A, B, C"}
+        assert validate_ranking(obj, {"A", "B", "C"}) is None
+
+    def test_fewer_than_2(self):
+        obj = {"ranking": ["A"]}
+        assert validate_ranking(obj, {"A", "B"}) is None
+
+    def test_invalid_letters(self):
+        obj = {"ranking": ["A", "B", "X"]}
+        assert validate_ranking(obj, {"A", "B", "C"}) is None
+
+    def test_duplicates_removed(self):
+        obj = {"ranking": ["A", "B", "A", "C"]}
+        result = validate_ranking(obj, {"A", "B", "C"})
+        assert result == ["A", "B", "C"]
+
+    def test_non_strings(self):
+        obj = {"ranking": [1, 2, 3]}
+        assert validate_ranking(obj, {"A", "B", "C"}) is None
+
+    def test_strip_and_uppercase(self):
+        obj = {"ranking": [" a ", " b ", " c "]}
+        result = validate_ranking(obj, {"A", "B", "C"})
+        assert result == ["A", "B", "C"]
+
+    def test_multi_char_rejected(self):
+        obj = {"ranking": ["AB", "C"]}
+        assert validate_ranking(obj, {"A", "B", "C"}) is None
+
+    def test_not_a_dict(self):
+        assert validate_ranking(["A", "B"], {"A", "B"}) is None
+
+
+# ── parse_ranking_json ───────────────────────────────────────────
+
+
+class TestParseRankingJson:
+    def test_full_pipeline(self):
+        text = '```json\n{"ranking": ["B", "A", "C"]}\n```'
+        result = parse_ranking_json(text, {"A", "B", "C"})
+        assert result == ["B", "A", "C"]
+
+    def test_no_json_returns_empty(self):
+        result = parse_ranking_json("no json here", {"A", "B"})
+        assert result == []
+
+    def test_invalid_letters_returns_empty(self):
+        text = '```json\n{"ranking": ["X", "Y"]}\n```'
+        result = parse_ranking_json(text, {"A", "B"})
+        assert result == []
+
+    def test_malformed_json_returns_empty(self):
+        text = '```json\n{ranking: [A, B]}\n```'
+        result = parse_ranking_json(text, {"A", "B"})
+        assert result == []
+
+
+# ── build_repair_prompt ──────────────────────────────────────────
+
+
+class TestBuildRepairPrompt:
+    def test_contains_letters(self):
+        prompt = build_repair_prompt({"C", "A", "B"})
+        assert "A" in prompt
+        assert "B" in prompt
+        assert "C" in prompt
+
+    def test_contains_json_example(self):
+        prompt = build_repair_prompt({"A", "B"})
+        assert '"ranking"' in prompt
+        # Should be valid JSON in the example
+        assert '["A", "B"]' in prompt
+
+    def test_sorted_letters(self):
+        prompt = build_repair_prompt({"C", "A", "B"})
+        # The example should have letters in sorted order
+        expected = json.dumps({"ranking": ["A", "B", "C"]})
+        assert expected in prompt
