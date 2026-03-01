@@ -20,6 +20,7 @@ import re
 import string
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -228,6 +229,142 @@ class _Progress:
 
     def done(self, total_seconds: float):
         self._emit(f"  Done in {total_seconds}s")
+
+
+# ──────────────────────────────────────────────────────────────
+# Session store — multi-turn conversation memory
+# ──────────────────────────────────────────────────────────────
+
+_SESSIONS_DIR = Path.home() / ".config" / "conclave" / "sessions"
+_SUMMARY_MAX_CHARS = 300
+
+
+class _SessionStore:
+    """Manages JSON session files for multi-turn conversations."""
+
+    def __init__(self):
+        self._dir = _SESSIONS_DIR
+
+    def _ensure_dir(self):
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, session_id: str) -> Path:
+        return self._dir / f"{session_id}.json"
+
+    def new(self) -> dict:
+        """Create a fresh session with a timestamp + random suffix."""
+        self._ensure_dir()
+        suffix = "".join(random.choices(string.ascii_lowercase, k=4))
+        sid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + f"-{suffix}"
+        session = {
+            "id": sid,
+            "created": datetime.now(timezone.utc).isoformat(),
+            "turns": [],
+        }
+        self.save(session)
+        return session
+
+    def load(self, session_id: str) -> dict:
+        p = self._path(session_id)
+        if not p.exists():
+            raise FileNotFoundError(f"Session not found: {session_id}")
+        with open(p) as f:
+            return json.load(f)
+
+    def save(self, session: dict):
+        self._ensure_dir()
+        with open(self._path(session["id"]), "w") as f:
+            json.dump(session, f, indent=2, ensure_ascii=False)
+
+    def list_sessions(self) -> list[dict]:
+        """Return summaries of all sessions, most recent first."""
+        if not self._dir.exists():
+            return []
+        sessions = []
+        for p in sorted(self._dir.glob("*.json"), reverse=True):
+            try:
+                with open(p) as f:
+                    s = json.load(f)
+                turns = s.get("turns", [])
+                first_prompt = turns[0]["prompt"][:60] if turns else "(empty)"
+                sessions.append({
+                    "id": s["id"],
+                    "created": s.get("created", "?"),
+                    "turns": len(turns),
+                    "preview": first_prompt,
+                })
+            except (json.JSONDecodeError, KeyError):
+                continue
+        return sessions
+
+    def resolve(self, arg: str) -> dict:
+        """Resolve a --session argument to a session dict.
+
+        Accepted values:
+          "new"   — create a fresh session
+          "last"  — load the most recently modified session
+          "<id>"  — load by explicit session ID
+        """
+        if arg == "new":
+            return self.new()
+        if arg == "last":
+            if not self._dir.exists():
+                return self.new()
+            files = sorted(self._dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not files:
+                return self.new()
+            with open(files[0]) as f:
+                return json.load(f)
+        return self.load(arg)
+
+
+def _summarize_draft(draft: dict) -> str:
+    """Truncate a draft's content to a compact summary."""
+    if "error" in draft:
+        return f"[error: {draft['error'][:80]}]"
+    if draft.get("needs_claude_code"):
+        return "[local — Claude Code]"
+    content = draft.get("content", "")
+    if len(content) > _SUMMARY_MAX_CHARS:
+        return content[:_SUMMARY_MAX_CHARS] + "..."
+    return content
+
+
+def _build_context_prompt(session: dict, current_prompt: str) -> str:
+    """Prepend summarized prior turns to the current prompt."""
+    turns = session.get("turns", [])
+    if not turns:
+        return current_prompt
+
+    parts = ["## Prior conversation\n"]
+    for i, turn in enumerate(turns, 1):
+        parts.append(f"### Turn {i} — \"{turn['prompt'][:80]}\"")
+        for d in turn.get("drafts", []):
+            label = d.get("label", d.get("key", "?"))
+            parts.append(f"**{label}:** {d['summary']}")
+        parts.append("")  # blank line between turns
+
+    parts.append("---\n")
+    parts.append("## Current question")
+    parts.append(current_prompt)
+    return "\n".join(parts)
+
+
+def _record_turn(session: dict, prompt: str, depth: str, drafts: list) -> None:
+    """Append a completed turn to the session (mutates in-place)."""
+    turn = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "prompt": prompt,
+        "depth": depth,
+        "drafts": [],
+    }
+    for d in drafts:
+        turn["drafts"].append({
+            "key": d.get("key", "?"),
+            "label": d.get("label", d.get("key", "?")),
+            "summary": _summarize_draft(d),
+        })
+    session["turns"].append(turn)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -768,21 +905,29 @@ async def run_conclave(prompt: str, depth: str = "standard",
                        system: Optional[str] = None,
                        member_keys: Optional[list[str]] = None,
                        cfg: Optional[dict] = None,
-                       quiet: bool = False) -> dict:
+                       quiet: bool = False,
+                       session: Optional[dict] = None) -> dict:
     cfg = cfg or load_config()
     templates = load_templates()
     progress = _Progress(quiet=quiet)
+    store = _SessionStore()
     total_start = time.time()
 
     members = cfg.get("council_members", [])
     if member_keys:
         members = [m for m in members if m["key"] in member_keys]
 
+    # ── Build context-enriched prompt if continuing a session ──
+    effective_prompt = prompt
+    if session and session.get("turns"):
+        effective_prompt = _build_context_prompt(session, prompt)
+        progress._emit(f"  Session {session['id']} — turn {len(session['turns']) + 1}")
+
     progress.header(depth, len(members))
 
     # ── Phase 1 ──
     progress.phase_start(1, "Independent drafts...")
-    drafts = await phase1(prompt, system, members, cfg, progress)
+    drafts = await phase1(effective_prompt, system, members, cfg, progress)
     local_count = sum(1 for d in drafts if d.get("needs_claude_code", False))
     api_ok_count = sum(1 for d in drafts if "error" not in d and not d.get("needs_claude_code", False))
     fail_count = sum(1 for d in drafts if "error" in d)
@@ -793,8 +938,15 @@ async def run_conclave(prompt: str, depth: str = "standard",
     # Need at least 2 members with content (API responses) for cross-critique
     if depth == "deep" and (api_ok_count + local_count) >= 2:
         progress.phase_start(2, "Anonymized cross-critique...")
-        critiques = await phase2(prompt, drafts, members, cfg, templates, progress)
+        critiques = await phase2(effective_prompt, drafts, members, cfg, templates, progress)
         rankings = aggregate_rankings(critiques)
+
+    # ── Save turn to session ──
+    session_id = None
+    if session is not None:
+        _record_turn(session, prompt, depth, drafts)
+        store.save(session)
+        session_id = session["id"]
 
     total_elapsed = round(time.time() - total_start, 2)
     progress.done(total_elapsed)
@@ -803,6 +955,7 @@ async def run_conclave(prompt: str, depth: str = "standard",
         "prompt": prompt,
         "system": system,
         "depth": depth,
+        "session_id": session_id,
         "total_elapsed_seconds": total_elapsed,
         "phase1_drafts": drafts,
         "phase2_critiques": critiques,
@@ -883,8 +1036,25 @@ def print_pretty(result: dict) -> None:
     print(f"{'═'*64}\n")
 
 
+def _print_session_list() -> None:
+    """Print all saved sessions to stderr and exit."""
+    store = _SessionStore()
+    sessions = store.list_sessions()
+    if not sessions:
+        print("No saved sessions.", file=sys.stderr)
+        sys.exit(0)
+    print(f"\n{'─'*60}", file=sys.stderr)
+    print("  Saved sessions", file=sys.stderr)
+    print(f"{'─'*60}", file=sys.stderr)
+    for s in sessions:
+        turns = s["turns"]
+        print(f"  {s['id']}  ({turns} turn{'s' if turns != 1 else ''})  {s['preview']}", file=sys.stderr)
+    print(f"{'─'*60}\n", file=sys.stderr)
+    sys.exit(0)
+
+
 def main():
-    # ── Handle "doctor" before argparse to avoid subparser conflicts ──
+    # ── Handle special commands before argparse ──
     if len(sys.argv) >= 2 and sys.argv[1] == "doctor":
         cfg = load_config()
         results = asyncio.run(doctor(cfg))
@@ -894,6 +1064,9 @@ def main():
         print()
         sys.exit(0)
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "sessions":
+        _print_session_list()
+
     parser = argparse.ArgumentParser(
         description="Conclave — Multi-LLM Council with anonymized debate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -902,6 +1075,10 @@ Examples:
   conclave.py "What is the CAP theorem?" --depth quick
   conclave.py "Review this architecture" --depth deep
   conclave.py --members claude,gemini "Explain monads"
+  conclave.py --session new "What is CAP?"
+  conclave.py --session last "Now explain PACELC"
+  conclave.py --session 20260301-143022 "And Raft consensus?"
+  conclave.py sessions
   conclave.py doctor
         """,
     )
@@ -913,6 +1090,8 @@ Examples:
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress stderr progress")
     parser.add_argument("--estimate", action="store_true",
                         help="Estimate cost and exit without calling APIs")
+    parser.add_argument("--session", default=None, metavar="ID",
+                        help="Multi-turn session: 'new', 'last', or a session ID")
 
     args = parser.parse_args()
     cfg = load_config()
@@ -931,6 +1110,12 @@ Examples:
             print_estimate(est, args.depth)
         sys.exit(0)
 
+    # ── Resolve session ──
+    session = None
+    if args.session:
+        store = _SessionStore()
+        session = store.resolve(args.session)
+
     result = asyncio.run(run_conclave(
         prompt=args.prompt,
         depth=args.depth,
@@ -938,6 +1123,7 @@ Examples:
         member_keys=member_keys,
         cfg=cfg,
         quiet=args.quiet,
+        session=session,
     ))
 
     if args.raw:
