@@ -91,11 +91,11 @@ pip install httpx
 ### 2. Configure
 
 ```bash
-cd ~/.claude/skills/conclave
-cp .env.template .env
+mkdir -p ~/.config/conclave
+cp ~/.claude/skills/conclave/.env.template ~/.config/conclave/.env
 ```
 
-Edit `.env` with your API keys and preferred models:
+Edit `~/.config/conclave/.env` with your API keys and preferred models:
 
 ```bash
 # ── API Keys ──────────────────────────────
@@ -220,7 +220,7 @@ Custom prompts in **`prompts/templates.yaml`** (optional, requires `pyyaml`).
 
 ```
 conclave/
-├── .env.template           ← Copy to .env, fill in keys + models
+├── .env.template           ← Copy to ~/.config/conclave/.env
 ├── SKILL.md                ← Claude Code skill definition
 ├── LICENSE                 ← Apache 2.0
 ├── prompts/

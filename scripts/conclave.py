@@ -28,12 +28,13 @@ from typing import Any, Optional
 # ──────────────────────────────────────────────────────────────
 
 def _load_env_file() -> dict[str, str]:
-    """Parse .env file into a dict. Does NOT override existing env vars."""
+    """Parse .env file into a dict. Does NOT override existing env vars.
+    Searches ONLY safe locations (not the skill directory, to avoid
+    exposing API keys to LLM agents that can read skill files)."""
     env_vals: dict[str, str] = {}
     search_paths = [
-        Path(__file__).parent.parent / ".env",
-        Path(".") / ".env",
         Path.home() / ".config" / "conclave" / ".env",
+        Path(".") / ".env",
     ]
     for p in search_paths:
         if p.exists():

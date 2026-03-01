@@ -5,112 +5,138 @@ description: "Conclave — Multi-LLM Council with anonymized debate. Orchestrate
 
 # Conclave: Multi-LLM Council with Anonymized Debate
 
-## What It Does
+## CRITICAL: Always Run the Script
 
-Sends the user's prompt to multiple LLMs in parallel, optionally makes them
-**anonymously critique and rank each other's responses**, then synthesizes
-everything into a single superior answer.
+**DO NOT check or read `.env` or `.env.template` files.** The script handles
+its own configuration automatically. API keys and model settings are already
+configured in the user's `.env` file, which the script finds on its own.
 
-Claude is both a **council member** and the **synthesizer** — but it runs
-locally in Claude Code (no API call), saving cost and latency.
+**ALWAYS run the script first**, then work with the JSON output.
 
-Inspired by [Karpathy's LLM Council](https://github.com/karpathy/llm-council).
+## Quick Reference
 
-## Key Features
+```bash
+# SKILL_DIR = directory containing this SKILL.md file
+SKILL_DIR="$(dirname "$(realpath "$0")")"  # or use the skill's known path
 
-- **Local Claude** — Claude participates as a council member without an API call (runs in Claude Code)
-- **Anonymized reviews** — in Phase 2, responses are labeled "Response A", "Response B" etc. so models can't play favorites
-- **Aggregate ranking** — each model ranks the others; scores are averaged to find the crowd's best answer
-- **Configurable** — models, providers, and API keys are in `.env.template`; prompts in `prompts/templates.yaml`
-- **OpenRouter support** — use 1 API key for all models, or direct keys per provider
-- **Graceful degradation** — if a model fails, the council continues with the rest
+# Determine depth from user intent:
+#   "quick" / "fast"           → --depth quick
+#   default / no modifier      → --depth standard
+#   "deep" / "debate" / "critical" → --depth deep
 
-## Architecture
-
-```
-Phase 1: Independent Drafts (all modes)
-  Script calls → [Gemini API] [GPT API] → responses in JSON
-  Claude Code  → generates its own draft directly (no API)
-
-Phase 2: Anonymized Cross-Critique (deep mode only)
-  Script calls → each remote model critiques others as "Response A/B/C"
-  Claude Code  → critiques the others' responses directly (no API)
-
-Phase 3: Synthesis (standard + deep)
-  Claude Code reads all drafts (+ critiques + rankings in deep)
-  and synthesizes the final answer
+python3 "${SKILL_DIR}/scripts/conclave.py" "<USER_PROMPT>" --depth <LEVEL> --raw
 ```
 
-## How Claude Code Should Use This Skill
+The `--raw` flag outputs JSON. **Always use `--raw`.**
+
+## Step-by-Step Flow
 
 ### Step 1: Run the script
-```bash
-python3 scripts/conclave.py "<user_prompt>" --depth <level> --raw
+
+Run `python3 <skill_dir>/scripts/conclave.py "<prompt>" --depth <level> --raw`
+
+The script will:
+- Load its own config (`.env` file next to the script — DO NOT manage this yourself)
+- Call remote APIs (Gemini, GPT, etc.) in parallel
+- Return JSON with results and placeholders for you (Claude)
+
+### Step 2: Parse JSON, find your placeholders
+
+The JSON `phase1_drafts` array contains one entry per council member.
+Entries with `"needs_claude_code": true` are YOUR drafts to fill.
+
+Example JSON structure:
+```json
+{
+  "phase1_drafts": [
+    {"key": "claude", "needs_claude_code": true, "prompt": "..."},
+    {"key": "gemini", "content": "Gemini's response...", "elapsed": 3.2},
+    {"key": "gpt", "content": "GPT's response...", "elapsed": 2.8}
+  ]
+}
 ```
 
-### Step 2: Parse the JSON output
-The JSON contains `phase1_drafts` (and `phase2_critiques` in deep mode).
-Entries with `"needs_claude_code": true` are **placeholders** that YOU must fill.
+### Step 3: Generate your independent draft
 
-### Step 3: Fill local member placeholders
+For each `needs_claude_code: true` entry in `phase1_drafts`:
 
-**Phase 1 (all modes):** Find drafts where `needs_claude_code` is true.
-Generate YOUR OWN independent answer to the original prompt.
-Important: answer as if you haven't seen the other models' responses yet —
-this preserves the independence of the council.
+**Write your OWN answer to the original prompt BEFORE reading the other models'
+responses.** This preserves the independence of the council. Pretend you haven't
+seen Gemini's or GPT's answers yet.
 
-**Phase 2 (deep mode only):** Find critiques where `needs_claude_code` is true.
-The critique entry includes a `prompt` field with the anonymized responses.
-Read it and provide your critique + ranking, treating them as "Response A/B/C"
-without knowing which model wrote which. End with:
+### Step 4: (Deep mode only) Generate your critique
+
+In deep mode, `phase2_critiques` will also have `needs_claude_code: true` entries.
+Each includes a `prompt` field with anonymized responses ("Response A", "Response B").
+
+Read them and provide your critique + ranking. End with:
 ```
 FINAL RANKING:
-1. Response [best]
+1. Response [best letter]
 2. Response [second]
 3. Response [third]
 ```
 
-### Step 4: Synthesize
+### Step 5: Synthesize the final answer
 
-**Quick mode:** Present all drafts (including yours) side by side. No synthesis needed.
+**Quick mode:** Present all drafts (including yours) side by side. Done.
 
-**Standard mode:** Read all Phase 1 drafts and synthesize:
+**Standard mode:** Synthesize all Phase 1 drafts:
 ```
 ## 🏛️ Conclave Response
-### Consensus · Key Insights · Disagreements · Final Answer
+
+### Consensus
+[Points where all models agree — high confidence]
+
+### Key Insights
+[Unique valuable contributions from individual models]
+
+### Disagreements
+[Where models diverged, and which position is stronger]
+
+### Final Answer
+[The best unified answer]
 ```
 
-**Deep mode:** Read all Phase 1 drafts + Phase 2 critiques + aggregate rankings:
+**Deep mode:** Synthesize Phase 1 drafts + Phase 2 critiques + aggregate rankings:
 ```
 ## 🔥 Conclave Deep Debate
-### The Debate · Post-Debate Consensus · Resolved Disagreements
-### Aggregate Rankings · Open Questions · Final Answer
+
+### The Debate
+[Summary of challenges and concessions]
+
+### Post-Debate Consensus
+[Points that survived adversarial critique — very high confidence]
+
+### Resolved Disagreements
+[Issues the debate clarified]
+
+### Aggregate Rankings
+[Show the rankings from the JSON]
+
+### Open Questions
+[Legitimate remaining disagreements]
+
+### Final Answer
+[The best unified answer, informed by the full debate]
 ```
 
 ## Depth Levels
 
-| Command | Phases | API calls | Best for |
-|---------|--------|-----------|----------|
-| `/conclave quick ...` | 1 | remote models only | Factual questions, sanity checks |
-| `/conclave ...` | 1 + 3 | remote models only | Analysis, code review, recommendations |
-| `/conclave deep ...` | 1 + 2 + 3 | remote models × 2 | Architecture, security, critical decisions |
+| Trigger | Depth | Phases | Best for |
+|---------|-------|--------|----------|
+| `/conclave quick ...` | quick | 1 | Factual questions, sanity checks |
+| `/conclave ...` | standard | 1 + 3 | Analysis, code review, recommendations |
+| `/conclave deep ...` | deep | 1 + 2 + 3 | Architecture, security, critical decisions |
 
-## Running
+## Troubleshooting
 
-```bash
-python3 scripts/conclave.py "<prompt>" --depth standard --raw
-python3 scripts/conclave.py "<prompt>" --depth deep --raw
-python3 scripts/conclave.py doctor   # health check
-```
+- **Script not found?** The script is at `<this_skill_dir>/scripts/conclave.py`
+- **API errors?** Run `python3 <skill_dir>/scripts/conclave.py doctor` to check
+- **All failed?** You (Claude) are still available as LOCAL member — provide your answer solo with a note that remote models were unavailable
 
-Flags: `--depth`, `--members`, `--system`, `--raw`
+## Security Note
 
-## Configuration
-
-Edit `.env` (copied from `.env.template`) to:
-- Switch between OpenRouter (1 key) and direct API keys
-- Add/remove/swap council members
-- Mark any member as `LOCAL=true` to skip API calls
-- Adjust temperature, max_tokens, timeout
-
-Edit `prompts/templates.yaml` to customize critique and synthesis prompts (optional, requires pyyaml).
+API keys are stored in `~/.config/conclave/.env` — **never** in the skill
+directory. The script loads them automatically from there. This prevents
+LLM agents from accidentally reading secrets when scanning skill files.
