@@ -315,7 +315,17 @@ conclave/
 ├── prompts/
 │   └── templates.yaml      ← Custom critique/synthesis prompts (optional)
 ├── scripts/
-│   └── conclave.py         ← The engine (~1100 lines, 1 dependency: httpx)
+│   ├── conclave.py         ← Slim CLI entry point (imports from package)
+│   └── conclave/           ← Core package (1 dependency: httpx)
+│       ├── __init__.py     ← Public API: run_conclave, load_config, doctor, estimate_cost
+│       ├── config.py       ← .env loading, member discovery, templates
+│       ├── providers.py    ← HTTP retry, Anthropic/Gemini/OpenAI/OpenRouter callers
+│       ├── ranking.py      ← Ranking extraction, aggregation, critique prompts
+│       ├── sessions.py     ← Multi-turn session store and context building
+│       ├── progress.py     ← Real-time stderr progress reporting
+│       ├── cost.py         ← Pricing data and cost estimation
+│       ├── orchestrator.py ← Phase 1/2 orchestration, run_conclave, doctor
+│       └── cli.py          ← argparse, pretty printing, main()
 └── README.md
 
 ~/.config/conclave/
@@ -354,6 +364,7 @@ PRs welcome! Ideas:
 - [x] Cost estimation per query (`--estimate`)
 - [x] Robust ranking parser (regex + structured prompts)
 - [x] Multi-turn conversation memory (`--session`)
+- [x] Modular package architecture (config, providers, ranking, sessions, cost, orchestrator, cli)
 - [ ] Web UI for visualizing debates
 - [ ] Export debate transcripts to Markdown
 - [ ] Token budget management (auto-truncate long sessions)
