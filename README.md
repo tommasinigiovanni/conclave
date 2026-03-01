@@ -72,6 +72,10 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 | **3 depth levels** | ✅ quick/standard/deep | ❌ Always full | ❌ Always full |
 | **Anonymized review** | ✅ | ✅ | ❌ |
 | **Aggregate ranking** | ✅ | ✅ | ❌ |
+| **Multi-turn sessions** | ✅ `--session` | ❌ | ❌ |
+| **Cost estimation** | ✅ `--estimate` | ❌ | ❌ |
+| **Real-time progress** | ✅ stderr progress | ❌ | ❌ |
+| **Retry + backoff** | ✅ Exponential | ❌ | ❌ |
 | **`.env` config** | ✅ Swap models in 1 line | Python edit | ✅ |
 | **OpenRouter support** | ✅ 1 key for all | ✅ | ✅ |
 | **Direct API keys** | ✅ Also supported | ❌ | ✅ |
@@ -138,7 +142,7 @@ python3 scripts/conclave.py doctor
 
 🩺 Conclave Health Check
 
-  🟣 Claude:  ✅ 1.2s
+  🟣 Claude:  🏠 Local (Claude Code)
   🔵 Gemini:  ✅ 0.8s
   🟢 GPT:     ✅ 1.5s
 ```
@@ -216,6 +220,91 @@ The script **auto-discovers** all members by scanning for `CONCLAVE_MEMBER_*_MOD
 
 Custom prompts in **`prompts/templates.yaml`** (optional, requires `pyyaml`).
 
+## Cost Estimation
+
+Preview estimated costs **before** running any API calls:
+
+```bash
+python3 scripts/conclave.py "Explain CRDT" --depth deep --estimate
+
+────────────────────────────────────────────────────
+  Cost estimate  (depth=deep)
+────────────────────────────────────────────────────
+  💰 🔵 Gemini      gemini-3.1-pro-preview            P1 $0.0205  P2 $0.0256
+  💰 🟢 GPT         gpt-5.2                           P1 $0.0164  P2 $0.0246
+  🏠 🟣 Claude      claude-opus-4.6                   free (local)
+────────────────────────────────────────────────────
+  Phase 1 $0.0369 · Phase 2 $0.0502 · Total $0.0871
+  Estimates assume max output tokens; actual cost is usually lower.
+────────────────────────────────────────────────────
+```
+
+Combine with `--raw` for machine-readable JSON output. Local members (Claude Code) are always free.
+
+## Real-Time Progress
+
+During execution the council reports progress to **stderr** as each model completes, so you see activity immediately instead of waiting in silence:
+
+```
+🏛️ Conclave — standard · 3 members
+  Phase 1 — Independent drafts...
+    🏠 🟣 Claude — local (Claude Code)
+    ✅ 🔵 Gemini — 3.2s
+    ✅ 🟢 GPT — 4.1s
+  Done in 4.2s
+```
+
+JSON output on stdout remains clean. Suppress with `--quiet` / `-q`.
+
+## Multi-Turn Sessions
+
+Continue a conversation across multiple conclave invocations. Each turn's responses are summarized and prepended as context to the next prompt:
+
+```bash
+# Start a new session
+python3 scripts/conclave.py "What is the CAP theorem?" --session new --raw
+
+# Continue the same session (models see prior context)
+python3 scripts/conclave.py "How does PACELC extend it?" --session last --raw
+
+# Continue a specific session by ID
+python3 scripts/conclave.py "And what about Raft consensus?" --session 20260301-143022-abcd --raw
+
+# List all saved sessions
+python3 scripts/conclave.py sessions
+```
+
+Sessions are stored as JSON files in `~/.config/conclave/sessions/`. Each model receives the full conversation history (all models' prior answers, summarized) as context. Without `--session`, behavior is single-turn as before.
+
+## Retry and Resilience
+
+API calls automatically retry with **exponential backoff** on transient failures (429, 5xx, timeouts, connection errors). Configurable via `.env`:
+
+```bash
+CONCLAVE_MAX_RETRIES=3          # max retry attempts (default: 3)
+CONCLAVE_RETRY_BASE_DELAY=1.0   # base delay in seconds (default: 1.0)
+CONCLAVE_TIMEOUT=120            # per-request timeout in seconds (default: 120)
+```
+
+Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thundering herd.
+
+## CLI Reference
+
+```
+conclave.py <prompt> [options]
+conclave.py doctor                  Health check all models
+conclave.py sessions                List saved sessions
+
+Options:
+  --depth {quick,standard,deep}     Depth level (default: standard)
+  --members claude,gemini           Comma-separated member keys
+  --system "..."                    System prompt for all models
+  --raw                             JSON-only output on stdout
+  --quiet, -q                       Suppress stderr progress
+  --estimate                        Estimate cost and exit
+  --session {new,last,<id>}         Multi-turn conversation session
+```
+
 ## Project Structure
 
 ```
@@ -226,8 +315,13 @@ conclave/
 ├── prompts/
 │   └── templates.yaml      ← Custom critique/synthesis prompts (optional)
 ├── scripts/
-│   └── conclave.py         ← The engine (~400 lines, 1 dependency: httpx)
+│   └── conclave.py         ← The engine (~1100 lines, 1 dependency: httpx)
 └── README.md
+
+~/.config/conclave/
+├── .env                    ← API keys and model config
+└── sessions/               ← Multi-turn session files (auto-created)
+    └── 20260301-143022-abcd.json
 ```
 
 **Only required dependency: `httpx`.** The `pyyaml` package is optional (only for custom prompt templates).
@@ -238,10 +332,16 @@ conclave/
 A: One model has blind spots. Three models debating catches errors, surfaces alternative approaches, and the anonymous ranking reveals which answer the *crowd* thinks is best — often different from what any single model would produce.
 
 **Q: Does it cost 3x more?**
-A: `quick` and `standard` modes cost the same as 3 individual API calls (they run in parallel). `deep` mode costs ~2x (two rounds of calls). But you're paying for significantly better answers.
+A: `quick` and `standard` modes cost the same as 3 individual API calls (they run in parallel). `deep` mode costs ~2x (two rounds of calls). Use `--estimate` to preview costs before running. Local members (Claude Code) are free.
 
 **Q: Can I add Grok, Llama, Mistral...?**
 A: Yes. Add 5 lines to your `.env` file. With OpenRouter, you get access to 200+ models with 1 API key.
+
+**Q: Can I have a multi-turn debate?**
+A: Yes. Use `--session new` on the first turn, then `--session last` for follow-ups. Each model sees a summary of all prior turns as context.
+
+**Q: What happens if an API call fails?**
+A: The script retries automatically with exponential backoff (configurable). If all retries fail, the member is marked as failed and the council continues without it.
 
 **Q: Why "Conclave"?**
 A: From Latin *con-clavis* ("locked with a key") — the secret meeting where cardinals debate behind closed doors to reach a final decision. That's exactly what the models do: deliberate in private, then announce a verdict.
@@ -249,11 +349,14 @@ A: From Latin *con-clavis* ("locked with a key") — the secret meeting where ca
 ## Contributing
 
 PRs welcome! Ideas:
+- [x] Retry with exponential backoff for API calls
+- [x] Real-time progress reporting (stderr)
+- [x] Cost estimation per query (`--estimate`)
+- [x] Robust ranking parser (regex + structured prompts)
+- [x] Multi-turn conversation memory (`--session`)
 - [ ] Web UI for visualizing debates
-- [ ] Conversation history / multi-turn council
-- [ ] Cost estimation per query
 - [ ] Export debate transcripts to Markdown
-- [ ] Streaming support
+- [ ] Token budget management (auto-truncate long sessions)
 
 ## Acknowledgments
 
