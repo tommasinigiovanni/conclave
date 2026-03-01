@@ -79,7 +79,7 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 | **`.env` config** | ✅ Swap models in 1 line | Python edit | ✅ |
 | **OpenRouter support** | ✅ 1 key for all | ✅ | ✅ |
 | **Direct API keys** | ✅ Also supported | ❌ | ✅ |
-| **Zero dependencies** | ✅ httpx only | React + FastAPI + uv | pip install |
+| **Minimal dependencies** | ✅ httpx only (`pip install .`) | React + FastAPI + uv | pip install |
 | **Custom prompts** | ✅ templates.yaml | ❌ | ❌ |
 | **Health check** | ✅ `doctor` command | ❌ | ✅ |
 
@@ -89,7 +89,12 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 
 ```bash
 git clone https://github.com/tommasinigiovanni/conclave.git ~/.claude/skills/conclave
-pip install httpx
+pip install ~/.claude/skills/conclave   # installs httpx automatically
+```
+
+Or install in editable/dev mode for development:
+```bash
+pip install -e "~/.claude/skills/conclave[dev]"
 ```
 
 ### 2. Configure
@@ -290,18 +295,18 @@ Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thunde
 
 ## Testing
 
-68 tests with zero API calls (all external calls mocked):
+97 tests with zero API calls (all external calls mocked):
 
 ```bash
-pip install pytest httpx    # one-time setup
+pip install -e ".[dev]"    # one-time setup (installs pytest + httpx)
 python3 -m pytest tests/ -v
 ```
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `test_ranking.py` | 27 | `parse_ranking` (numbered, arrows, comma, standalone, headers, edge cases), `aggregate_rankings`, `build_critique_prompt` |
-| `test_providers.py` | 18 | `_post` retry logic (429/5xx, timeout, connect errors, non-retryable 4xx), `call_model` routing (local placeholder, missing keys, provider dispatch) |
-| `test_orchestrator.py` | 14 | `phase1`, `phase2` (critiques, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure), `doctor` |
+| `test_ranking.py` | 62 | `parse_ranking` (numbered, arrows, comma, standalone, headers, edge cases), `extract_json_ranking`, `validate_ranking`, `parse_ranking_json`, `aggregate_rankings`, `build_critique_prompt`, `build_repair_prompt` |
+| `test_providers.py` | 19 | `_post` retry logic (429/5xx, timeout, connect errors, non-retryable 4xx), `call_model` routing (local placeholder, missing keys, provider dispatch) |
+| `test_orchestrator.py` | 16 | `phase1`, `phase2` (critiques, re-prompting, regex fallback, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure, summary counts), `doctor` |
 
 ## CLI Reference
 
@@ -325,6 +330,7 @@ Options:
 ```
 conclave/
 ├── .env.template           ← Copy to ~/.config/conclave/.env
+├── pyproject.toml          ← Package metadata, dependencies, CLI entry point
 ├── SKILL.md                ← Claude Code skill definition
 ├── LICENSE                 ← Apache 2.0
 ├── prompts/
@@ -343,9 +349,9 @@ conclave/
 │       └── cli.py          ← argparse, pretty printing, main()
 ├── tests/
 │   ├── conftest.py         ← sys.path setup for imports
-│   ├── test_ranking.py     ← Ranking parser, aggregation, critique prompts (27 tests)
-│   ├── test_providers.py   ← HTTP retry logic, call_model routing (18 tests)
-│   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor (14 tests)
+│   ├── test_ranking.py     ← Ranking parser, JSON extraction, aggregation, critique prompts (62 tests)
+│   ├── test_providers.py   ← HTTP retry logic, call_model routing (19 tests)
+│   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor (16 tests)
 └── README.md
 
 ~/.config/conclave/
@@ -385,7 +391,9 @@ PRs welcome! Ideas:
 - [x] Robust ranking parser (regex + structured prompts)
 - [x] Multi-turn conversation memory (`--session`)
 - [x] Modular package architecture (config, providers, ranking, sessions, cost, orchestrator, cli)
-- [x] Test suite — ranking parser, retry logic, phase orchestration (68 tests, pytest)
+- [x] Test suite — ranking parser, retry logic, phase orchestration (97 tests, pytest)
+- [x] `pyproject.toml` — installable package with `pip install`, CLI entry point, optional deps
+- [x] HTTP connection pooling — shared `httpx.AsyncClient` across all API calls in a session
 - [ ] Web UI for visualizing debates
 - [ ] Export debate transcripts to Markdown
 - [ ] Token budget management (auto-truncate long sessions)

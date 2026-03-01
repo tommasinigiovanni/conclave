@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conclave"
+version = "0.1.0"
+description = "Multi-LLM Council with anonymized debate"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+templates = ["pyyaml>=6.0"]
+dev = [
+    "pytest>=7.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+conclave = "conclave.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

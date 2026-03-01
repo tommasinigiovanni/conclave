@@ -4,6 +4,8 @@ import asyncio
 import time
 from typing import Optional
 
+import httpx
+
 from .config import load_config, load_templates
 from .progress import _Progress
 from .providers import call_model
@@ -22,8 +24,10 @@ async def doctor(cfg: dict) -> list[dict]:
     local_members = [m for m in members if m.get("local", False)]
 
     prompt = "Reply with exactly: OK"
-    tasks = [call_model(m, prompt, None, cfg) for m in remote_members]
-    results = await asyncio.gather(*tasks)
+    timeout = cfg.get("defaults", {}).get("timeout_seconds", 120)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        tasks = [call_model(m, prompt, None, cfg, client=client) for m in remote_members]
+        results = await asyncio.gather(*tasks)
     report = []
     for m in local_members:
         report.append({"member": m["label"], "icon": m.get("icon", ""),
@@ -35,9 +39,9 @@ async def doctor(cfg: dict) -> list[dict]:
 
 
 async def phase1(prompt: str, system: Optional[str], members: list, cfg: dict,
-                  progress: _Progress) -> list:
+                  progress: _Progress, *, client=None) -> list:
     async def _call_and_report(m):
-        result = await call_model(m, prompt, system, cfg)
+        result = await call_model(m, prompt, system, cfg, client=client)
         result["key"] = m["key"]
         result["label"] = m["label"]
         result["icon"] = m.get("icon", "")
@@ -48,7 +52,8 @@ async def phase1(prompt: str, system: Optional[str], members: list, cfg: dict,
 
 
 async def phase2(original_prompt: str, drafts: list, members: list,
-                 cfg: dict, templates: dict, progress: _Progress) -> list:
+                 cfg: dict, templates: dict, progress: _Progress,
+                 *, client=None) -> list:
     """Anonymized cross-critique with ranking."""
     anonymize = cfg.get("anonymize_reviews", True)
     system = templates.get("critique_system", "You are a peer reviewer in an expert council.")
@@ -59,7 +64,7 @@ async def phase2(original_prompt: str, drafts: list, members: list,
 
     async def _critique_and_report(member, prompt_text, meta_info):
         valid_letters = set(meta_info["letter_map"].keys())
-        result = await call_model(member, prompt_text, system, cfg)
+        result = await call_model(member, prompt_text, system, cfg, client=client)
         result.update(meta_info)
         result["ranking_reprompted"] = False
 
@@ -73,7 +78,7 @@ async def phase2(original_prompt: str, drafts: list, members: list,
             repair_text = ""
             if not ranking:
                 repair_msg = build_repair_prompt(valid_letters)
-                repair_result = await call_model(member, repair_msg, system, cfg)
+                repair_result = await call_model(member, repair_msg, system, cfg, client=client)
                 result["ranking_reprompted"] = True
                 if "error" not in repair_result and "content" in repair_result:
                     repair_text = repair_result["content"]
@@ -127,21 +132,23 @@ async def run_conclave(prompt: str, depth: str = "standard",
 
     progress.header(depth, len(members))
 
-    # ── Phase 1 ──
-    progress.phase_start(1, "Independent drafts...")
-    drafts = await phase1(effective_prompt, system, members, cfg, progress)
-    local_count = sum(1 for d in drafts if d.get("needs_claude_code", False))
-    api_ok_count = sum(1 for d in drafts if "error" not in d and not d.get("needs_claude_code", False))
-    fail_count = sum(1 for d in drafts if "error" in d)
+    timeout = cfg.get("defaults", {}).get("timeout_seconds", 120)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        # ── Phase 1 ──
+        progress.phase_start(1, "Independent drafts...")
+        drafts = await phase1(effective_prompt, system, members, cfg, progress, client=client)
+        local_count = sum(1 for d in drafts if d.get("needs_claude_code", False))
+        api_ok_count = sum(1 for d in drafts if "error" not in d and not d.get("needs_claude_code", False))
+        fail_count = sum(1 for d in drafts if "error" in d)
 
-    # ── Phase 2 (deep only) ──
-    critiques = []
-    rankings = {}
-    # Need at least 2 members with content (API responses) for cross-critique
-    if depth == "deep" and (api_ok_count + local_count) >= 2:
-        progress.phase_start(2, "Anonymized cross-critique...")
-        critiques = await phase2(effective_prompt, drafts, members, cfg, templates, progress)
-        rankings = aggregate_rankings(critiques)
+        # ── Phase 2 (deep only) ──
+        critiques = []
+        rankings = {}
+        # Need at least 2 members with content (API responses) for cross-critique
+        if depth == "deep" and (api_ok_count + local_count) >= 2:
+            progress.phase_start(2, "Anonymized cross-critique...")
+            critiques = await phase2(effective_prompt, drafts, members, cfg, templates, progress, client=client)
+            rankings = aggregate_rankings(critiques)
 
     # ── Save turn to session ──
     session_id = None

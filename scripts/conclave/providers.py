@@ -5,37 +5,46 @@ import random
 import time
 from typing import Optional
 
+import httpx
+
 
 async def _post(url: str, headers: dict, body: dict, timeout: int = 120,
-                max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
-    import httpx
+                max_retries: int = 3, retry_base_delay: float = 1.0,
+                *, client: httpx.AsyncClient | None = None) -> dict:
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=timeout)
     last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+    try:
+        for attempt in range(max_retries + 1):
+            try:
                 resp = await client.post(url, headers=headers, json=body)
                 resp.raise_for_status()
                 return resp.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                    last_exc = e
+                    delay = retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
                 last_exc = e
-                delay = retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-                await asyncio.sleep(delay)
-                continue
-            raise
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            last_exc = e
-            if attempt < max_retries:
-                delay = retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-                await asyncio.sleep(delay)
-                continue
-            raise
-    raise last_exc  # unreachable, but satisfies type checker
+                if attempt < max_retries:
+                    delay = retry_base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+        raise last_exc  # unreachable, but satisfies type checker
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 async def _call_anthropic(prompt: str, model: str, system: Optional[str],
                           api_key: str, temp: float, max_tok: int, timeout: int,
-                          max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
+                          max_retries: int = 3, retry_base_delay: float = 1.0,
+                          *, client: httpx.AsyncClient | None = None) -> dict:
     body: dict = {
         "model": model, "max_tokens": max_tok, "temperature": temp,
         "messages": [{"role": "user", "content": prompt}],
@@ -45,7 +54,7 @@ async def _call_anthropic(prompt: str, model: str, system: Optional[str],
     data = await _post("https://api.anthropic.com/v1/messages", {
         "x-api-key": api_key, "anthropic-version": "2023-06-01",
         "content-type": "application/json",
-    }, body, timeout, max_retries, retry_base_delay)
+    }, body, timeout, max_retries, retry_base_delay, client=client)
     text = "\n".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
     usage = data.get("usage", {})
     return {"content": text, "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
@@ -54,7 +63,8 @@ async def _call_anthropic(prompt: str, model: str, system: Optional[str],
 
 async def _call_gemini(prompt: str, model: str, system: Optional[str],
                        api_key: str, temp: float, max_tok: int, timeout: int,
-                       max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
+                       max_retries: int = 3, retry_base_delay: float = 1.0,
+                       *, client: httpx.AsyncClient | None = None) -> dict:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     body: dict = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -63,7 +73,7 @@ async def _call_gemini(prompt: str, model: str, system: Optional[str],
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
     data = await _post(url, {"content-type": "application/json"}, body, timeout,
-                       max_retries, retry_base_delay)
+                       max_retries, retry_base_delay, client=client)
     candidates = data.get("candidates", [])
     text = ""
     if candidates:
@@ -74,7 +84,8 @@ async def _call_gemini(prompt: str, model: str, system: Optional[str],
 
 async def _call_openai(prompt: str, model: str, system: Optional[str],
                        api_key: str, temp: float, max_tok: int, timeout: int,
-                       max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
+                       max_retries: int = 3, retry_base_delay: float = 1.0,
+                       *, client: httpx.AsyncClient | None = None) -> dict:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -91,7 +102,7 @@ async def _call_openai(prompt: str, model: str, system: Optional[str],
 
     data = await _post("https://api.openai.com/v1/chat/completions", {
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
-    }, body, timeout, max_retries, retry_base_delay)
+    }, body, timeout, max_retries, retry_base_delay, client=client)
     choices = data.get("choices", [])
     text = choices[0]["message"]["content"] if choices else ""
     tokens = data.get("usage", {}).get("total_tokens")
@@ -100,7 +111,8 @@ async def _call_openai(prompt: str, model: str, system: Optional[str],
 
 async def _call_openrouter(prompt: str, model: str, system: Optional[str],
                            api_key: str, temp: float, max_tok: int, timeout: int,
-                           max_retries: int = 3, retry_base_delay: float = 1.0) -> dict:
+                           max_retries: int = 3, retry_base_delay: float = 1.0,
+                           *, client: httpx.AsyncClient | None = None) -> dict:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -108,7 +120,7 @@ async def _call_openrouter(prompt: str, model: str, system: Optional[str],
     data = await _post("https://openrouter.ai/api/v1/chat/completions", {
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
     }, {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tok},
-        timeout, max_retries, retry_base_delay)
+        timeout, max_retries, retry_base_delay, client=client)
     choices = data.get("choices", [])
     text = choices[0]["message"]["content"] if choices else ""
     tokens = data.get("usage", {}).get("total_tokens")
@@ -116,7 +128,7 @@ async def _call_openrouter(prompt: str, model: str, system: Optional[str],
 
 
 async def call_model(member: dict, prompt: str, system: Optional[str],
-                     cfg: dict) -> dict:
+                     cfg: dict, *, client: httpx.AsyncClient | None = None) -> dict:
     """Call a single model. Returns {content, tokens, model, elapsed, error?}.
     For local members (local=true), returns a placeholder for Claude Code to fill."""
 
@@ -150,7 +162,7 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
                 return {"error": "OPENROUTER_API_KEY not set", "elapsed": 0}
             model_id = member.get("openrouter_model", "")
             result = await _call_openrouter(prompt, model_id, system, api_key, temp, max_tok,
-                                            timeout, max_retries, retry_base_delay)
+                                            timeout, max_retries, retry_base_delay, client=client)
         else:
             # Map provider to direct caller
             caller_map = {
@@ -165,7 +177,7 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
                 if api_key:
                     result = await _call_openrouter(prompt, member.get("openrouter_model", ""),
                                                     system, api_key, temp, max_tok, timeout,
-                                                    max_retries, retry_base_delay)
+                                                    max_retries, retry_base_delay, client=client)
                 else:
                     return {"error": f"No caller for provider '{provider}' and no OpenRouter key",
                             "elapsed": 0}
@@ -175,7 +187,7 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
                     return {"error": f"API key for {provider} not set", "elapsed": 0}
                 model_id = member.get("direct_model", "")
                 result = await caller_fn(prompt, model_id, system, api_key, temp, max_tok,
-                                         timeout, max_retries, retry_base_delay)
+                                         timeout, max_retries, retry_base_delay, client=client)
 
         result["elapsed"] = round(time.time() - start, 2)
         return result

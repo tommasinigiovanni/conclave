@@ -54,7 +54,7 @@ def templates():
 
 def _fake_call_model(responses: dict):
     """Return an AsyncMock that maps member key → response dict."""
-    async def _call(member, prompt, system, cfg):
+    async def _call(member, prompt, system, cfg, **kwargs):
         key = member["key"]
         base = responses.get(key, {"error": "not configured"})
         return dict(base)  # copy to avoid mutation across calls
@@ -125,7 +125,7 @@ class TestPhase2:
             '```json\n{"ranking": ["A", "B"]}\n```\n'
         )
 
-        async def fake_call(member, prompt, system, cfg):
+        async def fake_call(member, prompt, system, cfg, **kwargs):
             return {"content": critique_text, "tokens": 50, "model": "test", "elapsed": 1.0}
 
         with patch("conclave.orchestrator.call_model", side_effect=fake_call):
@@ -148,7 +148,7 @@ class TestPhase2:
         ]
 
         call_count = 0
-        async def fake_call(member, prompt, system, cfg):
+        async def fake_call(member, prompt, system, cfg, **kwargs):
             nonlocal call_count
             call_count += 1
             # Odd calls = initial critique (no JSON), even calls = repair (with JSON)
@@ -177,7 +177,7 @@ class TestPhase2:
         ]
 
         call_count = 0
-        async def fake_call(member, prompt, system, cfg):
+        async def fake_call(member, prompt, system, cfg, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count % 2 == 1:
@@ -205,7 +205,7 @@ class TestPhase2:
             {"key": "gpt",    "label": "GPT",    "content": "GPT answer"},
         ]
 
-        async def fake_call(member, prompt, system, cfg):
+        async def fake_call(member, prompt, system, cfg, **kwargs):
             # With only 1 other draft, valid_letters={"A"}, so return regex-parseable ranking
             return {"content": "Analysis.\n\nFINAL RANKING:\n1. A\n",
                     "tokens": 10, "model": "test", "elapsed": 0.5}
@@ -248,7 +248,7 @@ class TestRunConclave:
             "council_members": members,
         }
 
-    def _fake_call(self, member, prompt, system, cfg):
+    def _fake_call(self, member, prompt, system, cfg, **kwargs):
         """Simple mock: local → placeholder, remote → content."""
         if member.get("local"):
             return {"content": "", "needs_claude_code": True,
@@ -277,7 +277,7 @@ class TestRunConclave:
         cfg = self._cfg_with_members(members)
 
         call_count = 0
-        async def fake_call(member, prompt, system, cfg):
+        async def fake_call(member, prompt, system, cfg, **kwargs):
             nonlocal call_count
             call_count += 1
             # Phase 1 (first 3 calls): local → placeholder, remote → content
@@ -346,7 +346,7 @@ class TestDoctor:
             "council_members": members,
         }
 
-        async def fake_call(member, prompt, system, cfg):
+        async def fake_call(member, prompt, system, cfg, **kwargs):
             if member.get("local"):
                 return {"content": "", "needs_claude_code": True, "model": "x",
                         "tokens": None, "elapsed": 0}
@@ -375,7 +375,7 @@ class TestDoctor:
             "council_members": members,
         }
 
-        async def fake_call(member, prompt, system, cfg):
+        async def fake_call(member, prompt, system, cfg, **kwargs):
             return {"error": "API key for google not set", "elapsed": 0}
 
         with patch("conclave.orchestrator.call_model", side_effect=fake_call):
