@@ -37,12 +37,12 @@ You ask Claude a question. You get a good answer. But was it the *best* answer? 
 You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 
      ┌─────────┐  ┌─────────┐  ┌─────────┐
-     │ 🟣Claude │  │ 🔵Gemini│  │ 🟢 GPT  │   Phase 1: Independent answers
+     │ Claude  │  │  Gemini │  │   GPT   │   Phase 1: Independent answers
      └────┬────┘  └────┬────┘  └────┬────┘
           │            │            │
           ▼            ▼            ▼
      ┌─────────────────────────────────────┐
-     │  🔒 Anonymized Cross-Critique       │   Phase 2: Each model critiques
+     │  Anonymized Cross-Critique          │   Phase 2: Each model critiques
      │                                     │   "Response A" and "Response B"
      │  Claude → rates Gemini & GPT        │   (identities hidden to prevent
      │  Gemini → rates Claude & GPT        │    favoritism)
@@ -52,15 +52,15 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
      └──────────────────┬──────────────────┘
                         ▼
      ┌─────────────────────────────────────┐
-     │  👑 Claude Code Synthesis            │   Phase 3: Best of all worlds
-     │  (no extra API call — Claude Code    │   Claude Code reads everything
-     │   synthesizes directly)              │   and produces the final answer
+     │  Claude Code Synthesis              │   Phase 3: Best of all worlds
+     │  (no extra API call — Claude Code   │   Claude Code reads everything
+     │   synthesizes directly)             │   and produces the final answer
      │                                     │
-     │  ✅ Consensus (high confidence)     │
-     │  💡 Unique insights per model       │
-     │  ⚖️  Resolved disagreements         │
-     │  📊 Aggregate rankings              │
-     │  🎯 Final unified answer            │
+     │  Consensus (high confidence)        │
+     │  Unique insights per model          │
+     │  Resolved disagreements             │
+     │  Aggregate rankings                 │
+     │  Final unified answer               │
      └─────────────────────────────────────┘
 ```
 
