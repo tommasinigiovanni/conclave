@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import string
 import sys
 import time
@@ -155,14 +156,25 @@ def load_templates() -> dict:
             "2. Identify specific errors, gaps, or weak arguments\n"
             "3. Acknowledge strong points you may have missed in your own thinking\n"
             "4. Provide a FINAL RANKING of the responses (best to worst)\n\n"
-            "Be rigorous but constructive. This is peer review, not a competition."
+            "Be rigorous but constructive. This is peer review, not a competition.\n\n"
+            "IMPORTANT: End your response with a ranking block in exactly this format:\n"
+            "FINAL RANKING:\n"
+            "1. A\n"
+            "2. B\n"
+            "3. C\n"
+            "Use ONLY the single response letter on each line (A, B, C, etc.), "
+            "best first. Do NOT add explanations on the ranking lines."
         ),
         "critique_prompt": (
             "## Original Question\n{original_prompt}\n\n"
             "## Council Responses\n\n{anonymized_responses}\n\n---\n\n"
             "Now provide your critique of each response above.\n"
-            "End with:\n\nFINAL RANKING:\n1. [Best response letter]\n"
-            "2. [Second best]\n3. [Third best]"
+            "End with your ranking in exactly this format:\n\n"
+            "FINAL RANKING:\n"
+            "1. A\n"
+            "2. B\n"
+            "3. C\n\n"
+            "(Use only the single response letter per line, best to worst.)"
         ),
     }
     try:
@@ -456,22 +468,91 @@ def build_critique_prompt(original_prompt: str, drafts: list, exclude_key: str,
     return prompt_text, letter_map
 
 
+# ── Compiled patterns for ranking extraction ──
+
+# Flexible header: "FINAL RANKING", "Ranking:", "## Final Ranking", "My ranking:" …
+_RANKING_HEADER_RE = re.compile(
+    r'^[#\s]*\**\s*(?:final\s+)?ranking[:\-—.\s*]*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Numbered item: "1. Response A …", "2) **B** - reason", "1: A", "1- A" …
+_NUMBERED_ITEM_RE = re.compile(
+    r'^\s*\d+[.):\-]\s*'       # "1. " / "1) " / "1: " / "1- "
+    r'[\[(*]*\s*\**\s*'        # optional [, (, *, **
+    r'(?:[Rr]esponse\s+)?'     # optional "Response "
+    r'\**\s*'                   # optional closing bold before letter
+    r'([A-Z])\b',              # THE LETTER
+    re.MULTILINE,
+)
+
+# Single uppercase letter (word-boundary isolated) — used for inline / standalone
+_SINGLE_LETTER_RE = re.compile(r'\b([A-Z])\b')
+
+# Standalone letter on its own line: "A", "**B**", "[C]", "(A)"
+_STANDALONE_LETTER_RE = re.compile(
+    r'^\s*[\[(*]*\**([A-Z])\**[\])*]*\s*$',
+    re.MULTILINE,
+)
+
+
+def _dedup(seq: list[str]) -> list[str]:
+    """Remove duplicates while preserving order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in seq:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
 def parse_ranking(text: str) -> list[str]:
-    """Extract FINAL RANKING from critique text. Returns list of letters."""
-    ranking = []
-    in_ranking = False
-    for line in text.split("\n"):
+    """Extract FINAL RANKING from critique text.  Returns list of response letters.
+
+    Handles common LLM output variations with layered strategies:
+      Numbered:   "1. Response A", "2. B", "1. **A** - reason", "1) A"
+      Inline:     "A > B > C"  /  "A → B → C"
+      Comma:      "A, B, C"
+      Standalone: lines containing just "A", "**B**", "[C]"
+    """
+    # ── Locate the ranking section ──
+    header = _RANKING_HEADER_RE.search(text)
+    if not header:
+        return []
+
+    section = text[header.end():]
+    # Cap to ~20 lines to avoid false positives from subsequent prose
+    lines = section.strip().split("\n")[:20]
+    section_text = "\n".join(lines)
+
+    # ── Strategy 1: numbered list ──
+    found = _NUMBERED_ITEM_RE.findall(section_text)
+    if found:
+        return _dedup(found)
+
+    # ── Strategy 2: inline arrows  ("A > B > C", "A → B → C", "A >> B >> C") ──
+    for line in lines[:5]:
+        if re.search(r'[>→≫»]', line):
+            letters = _SINGLE_LETTER_RE.findall(line)
+            if len(letters) >= 2:
+                return _dedup(letters)
+
+    # ── Strategy 3: comma-separated  ("A, B, C") ──
+    for line in lines[:5]:
         stripped = line.strip()
-        if "FINAL RANKING" in stripped.upper():
-            in_ranking = True
-            continue
-        if in_ranking and stripped:
-            # Try to extract letter: "1. Response C" or "1. C"
-            for letter in LETTERS:
-                if f"Response {letter}" in stripped or stripped.endswith(f". {letter}"):
-                    ranking.append(letter)
-                    break
-    return ranking
+        if ',' in stripped and len(stripped) < 80:
+            letters = _SINGLE_LETTER_RE.findall(stripped)
+            if len(letters) >= 2:
+                return _dedup(letters)
+
+    # ── Strategy 4: standalone letters on their own lines ──
+    first_para = section_text.split("\n\n")[0]
+    found = _STANDALONE_LETTER_RE.findall(first_para)
+    if len(found) >= 2:
+        return _dedup(found)
+
+    return []
 
 
 def aggregate_rankings(critiques: list) -> dict:
