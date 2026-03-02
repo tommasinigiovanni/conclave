@@ -64,6 +64,17 @@ For each `needs_claude_code: true` entry in `phase1_drafts`:
 responses.** This preserves the independence of the council. Pretend you haven't
 seen Gemini's or GPT's answers yet.
 
+### Step 3b: (Deep mode only) Complete Phase 2 if pending
+
+If the JSON has `"phase2_pending": true`:
+
+1. Update the Phase 1 JSON: set your draft's `content` to your response from Step 3
+2. Write the updated JSON to a temp file (e.g., `/tmp/conclave_p1.json`)
+3. Run `python3 "${SKILL_DIR}/scripts/conclave.py" phase2 /tmp/conclave_p1.json --raw`
+4. Parse the Phase 2 JSON — it now has `phase2_critiques` and `aggregate_rankings`
+
+If `phase2_pending` is false or absent, skip this step.
+
 ### Step 4: (Deep mode only) Generate your critique
 
 In deep mode, `phase2_critiques` will also have `needs_claude_code: true` entries.

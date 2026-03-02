@@ -7,7 +7,7 @@ import sys
 
 from .config import load_config
 from .cost import estimate_cost, print_estimate
-from .orchestrator import doctor, run_conclave
+from .orchestrator import doctor, run_conclave, run_phase2_only
 from .scoring import load_scores, print_leaderboard
 from .sessions import _SessionStore
 
@@ -108,6 +108,35 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "sessions":
         _print_session_list()
 
+    if len(sys.argv) >= 3 and sys.argv[1] == "phase2":
+        filepath = sys.argv[2]
+        raw = "--raw" in sys.argv
+        quiet = "--quiet" in sys.argv or "-q" in sys.argv
+        try:
+            with open(filepath) as f:
+                phase1_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            print(json.dumps({"error": f"Cannot read phase1 file: {exc}"}),
+                  file=sys.stderr)
+            sys.exit(1)
+        if not phase1_data.get("phase2_pending"):
+            print(json.dumps({"error": "phase2_pending is not true in input"}),
+                  file=sys.stderr)
+            sys.exit(1)
+        if not phase1_data.get("effective_prompt"):
+            print(json.dumps({"error": "effective_prompt missing in input"}),
+                  file=sys.stderr)
+            sys.exit(1)
+        result = asyncio.run(run_phase2_only(phase1_data, quiet=quiet))
+        if raw:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print_pretty(result)
+            print("JSON_OUTPUT_START")
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            print("JSON_OUTPUT_END")
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(
         description="Conclave — Multi-LLM Council with anonymized debate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -119,6 +148,7 @@ Examples:
   conclave.py --session new "What is CAP?"
   conclave.py --session last "Now explain PACELC"
   conclave.py --session 20260301-143022 "And Raft consensus?"
+  conclave.py phase2 /path/to/phase1.json --raw
   conclave.py sessions
   conclave.py leaderboard
   conclave.py doctor

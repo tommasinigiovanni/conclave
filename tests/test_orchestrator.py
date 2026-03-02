@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from conclave.orchestrator import doctor, phase1, phase2, run_conclave
+from conclave.orchestrator import doctor, phase1, phase2, run_conclave, run_phase2_only
 from conclave.progress import _Progress
 
 
@@ -273,28 +273,28 @@ class TestRunConclave:
 
         assert result["phase2_critiques"] == []
 
-    def test_deep_runs_phase2(self, members):
+    def test_deep_defers_phase2_with_local(self, members):
+        """Deep with local member → phase2_pending=True, Phase 1 only."""
         cfg = self._cfg_with_members(members)
 
         call_count = 0
         async def fake_call(member, prompt, system, cfg, **kwargs):
             nonlocal call_count
             call_count += 1
-            # Phase 1 (first 3 calls): local → placeholder, remote → content
-            if call_count <= 3 and member.get("local"):
+            if member.get("local"):
                 return {"content": "", "needs_claude_code": True,
                         "model": "x", "tokens": None, "elapsed": 0}
-            return {"content": 'resp\n\n```json\n{"ranking": ["A", "B"]}\n```\n',
-                    "tokens": 10, "model": "x", "elapsed": 1.0}
+            return {"content": 'resp', "tokens": 10, "model": "x", "elapsed": 1.0}
 
         with patch("conclave.orchestrator.call_model", side_effect=fake_call):
             result = asyncio.run(run_conclave("test", depth="deep", cfg=cfg, quiet=True))
 
         assert result["depth"] == "deep"
-        # Phase 1: 3 calls, Phase 2: 3 critiques = 6 total (no re-prompts needed)
-        assert call_count == 6
-        assert len(result["phase2_critiques"]) == 3
-        assert result["aggregate_rankings"]  # non-empty
+        assert result["phase2_pending"] is True
+        # Phase 1 only: 3 calls (no Phase 2)
+        assert call_count == 3
+        assert result["phase2_critiques"] == []
+        assert result["aggregate_rankings"] == {}
 
     def test_member_keys_filters(self, members):
         cfg = self._cfg_with_members(members)
@@ -383,3 +383,228 @@ class TestDoctor:
 
         assert len(report) == 1
         assert "❌" in report[0]["status"]
+
+
+# ── Two-pass flow ────────────────────────────────────────────────
+
+
+class TestTwoPassFlow:
+    """Tests for phase2_pending deferral when local members are present."""
+
+    def _cfg_with_members(self, members):
+        return {
+            "provider_mode": "direct",
+            "direct_keys": {"anthropic": "sk-a", "google": "gk-g", "openai": "ok-o"},
+            "openrouter": {"api_key": ""},
+            "defaults": {
+                "temperature": 0.7, "max_tokens": 100,
+                "timeout_seconds": 10, "max_retries": 0, "retry_base_delay": 0.01,
+            },
+            "anonymize_reviews": True,
+            "council_members": members,
+        }
+
+    def _fake_call(self, member, prompt, system, cfg, **kwargs):
+        if member.get("local"):
+            return {"content": "", "needs_claude_code": True,
+                    "model": member.get("direct_model", "x"), "tokens": None, "elapsed": 0}
+        return {"content": f"{member['key']} response", "tokens": 10,
+                "model": member.get("direct_model", "x"), "elapsed": 1.0}
+
+    def test_deep_with_local_returns_phase2_pending(self, members):
+        """Local member present → phase2_pending=True, empty critiques."""
+        cfg = self._cfg_with_members(members)
+        with patch("conclave.orchestrator.call_model", side_effect=self._fake_call):
+            result = asyncio.run(run_conclave("test", depth="deep", cfg=cfg, quiet=True))
+
+        assert result["phase2_pending"] is True
+        assert result["phase2_critiques"] == []
+        assert result["aggregate_rankings"] == {}
+        assert result["effective_prompt"] is not None
+
+    def test_deep_without_local_runs_phase2_immediately(self):
+        """No local members → phase2_pending=False, critiques populated."""
+        api_only = [
+            {"key": "gemini", "label": "Gemini", "icon": "🔵",
+             "provider": "google", "local": False, "direct_model": "gemini-2.0-flash"},
+            {"key": "gpt", "label": "GPT", "icon": "🟢",
+             "provider": "openai", "local": False, "direct_model": "gpt-5.2"},
+            {"key": "llama", "label": "Llama", "icon": "🟠",
+             "provider": "openai", "local": False, "direct_model": "llama-3"},
+        ]
+        cfg = self._cfg_with_members(api_only)
+
+        async def fake_call(member, prompt, system, cfg, **kwargs):
+            return {"content": 'resp\n\n```json\n{"ranking": ["A", "B"]}\n```\n',
+                    "tokens": 10, "model": "x", "elapsed": 1.0}
+
+        with patch("conclave.orchestrator.call_model", side_effect=fake_call):
+            result = asyncio.run(run_conclave("test", depth="deep", cfg=cfg, quiet=True))
+
+        assert result["phase2_pending"] is False
+        assert result["effective_prompt"] is None
+        assert len(result["phase2_critiques"]) == 3
+        assert result["aggregate_rankings"]  # non-empty
+
+    def test_quick_and_standard_never_set_phase2_pending(self, members):
+        """Non-deep depths always have phase2_pending=False."""
+        cfg = self._cfg_with_members(members)
+        for depth in ("quick", "standard"):
+            with patch("conclave.orchestrator.call_model", side_effect=self._fake_call):
+                result = asyncio.run(run_conclave("test", depth=depth, cfg=cfg, quiet=True))
+            assert result["phase2_pending"] is False
+            assert result["effective_prompt"] is None
+
+    def test_effective_prompt_includes_session_context(self, members):
+        """Session mode: effective_prompt has prior turns baked in."""
+        cfg = self._cfg_with_members(members)
+        session = {
+            "id": "test-session-123",
+            "turns": [
+                {"prompt": "first question", "depth": "quick",
+                 "summaries": [{"key": "gemini", "summary": "Gemini said stuff"}]},
+            ],
+        }
+        with patch("conclave.orchestrator.call_model", side_effect=self._fake_call):
+            result = asyncio.run(run_conclave(
+                "follow-up question", depth="deep", cfg=cfg, quiet=True,
+                session=session))
+
+        assert result["phase2_pending"] is True
+        ep = result["effective_prompt"]
+        assert "first question" in ep
+        assert "follow-up question" in ep
+
+
+# ── run_phase2_only ──────────────────────────────────────────────
+
+
+class TestRunPhase2Only:
+    """Tests for the Phase 2 only entry point."""
+
+    def _cfg_with_members(self, members):
+        return {
+            "provider_mode": "direct",
+            "direct_keys": {"anthropic": "sk-a", "google": "gk-g", "openai": "ok-o"},
+            "openrouter": {"api_key": ""},
+            "defaults": {
+                "temperature": 0.7, "max_tokens": 100,
+                "timeout_seconds": 10, "max_retries": 0, "retry_base_delay": 0.01,
+            },
+            "anonymize_reviews": True,
+            "council_members": [
+                {"key": "claude", "label": "Claude", "icon": "🟣",
+                 "provider": "anthropic", "local": True, "direct_model": "claude-opus-4.6"},
+                {"key": "gemini", "label": "Gemini", "icon": "🔵",
+                 "provider": "google", "local": False, "direct_model": "gemini-2.0-flash"},
+                {"key": "gpt", "label": "GPT", "icon": "🟢",
+                 "provider": "openai", "local": False, "direct_model": "gpt-5.2"},
+            ],
+        }
+
+    def test_runs_phase2_with_completed_drafts(self):
+        """Produces critiques and rankings from completed drafts."""
+        members = [
+            {"key": "claude", "label": "Claude", "icon": "🟣",
+             "provider": "anthropic", "local": True, "direct_model": "claude-opus-4.6"},
+            {"key": "gemini", "label": "Gemini", "icon": "🔵",
+             "provider": "google", "local": False, "direct_model": "gemini-2.0-flash"},
+            {"key": "gpt", "label": "GPT", "icon": "🟢",
+             "provider": "openai", "local": False, "direct_model": "gpt-5.2"},
+        ]
+        cfg = self._cfg_with_members(members)
+        phase1_data = {
+            "prompt": "test question",
+            "system": None,
+            "depth": "deep",
+            "session_id": None,
+            "phase2_pending": True,
+            "effective_prompt": "test question",
+            "phase1_drafts": [
+                {"key": "claude", "label": "Claude", "content": "Claude's real answer",
+                 "needs_claude_code": True, "elapsed": 0},
+                {"key": "gemini", "label": "Gemini", "content": "Gemini response",
+                 "elapsed": 1.0},
+                {"key": "gpt", "label": "GPT", "content": "GPT response",
+                 "elapsed": 1.2},
+            ],
+        }
+
+        async def fake_call(member, prompt, system, cfg, **kwargs):
+            return {"content": 'Review.\n\n```json\n{"ranking": ["A", "B"]}\n```\n',
+                    "tokens": 50, "model": "test", "elapsed": 1.0}
+
+        with patch("conclave.orchestrator.call_model", side_effect=fake_call):
+            result = asyncio.run(run_phase2_only(phase1_data, cfg=cfg, quiet=True))
+
+        assert result["phase2_pending"] is False
+        assert len(result["phase2_critiques"]) == 3
+        assert result["aggregate_rankings"]  # non-empty
+        assert result["depth"] == "deep"
+
+    def test_returns_error_if_fewer_than_2_ok_drafts(self):
+        """Graceful error when not enough non-error drafts with content."""
+        members = [
+            {"key": "claude", "label": "Claude", "icon": "🟣",
+             "provider": "anthropic", "local": True, "direct_model": "claude-opus-4.6"},
+            {"key": "gemini", "label": "Gemini", "icon": "🔵",
+             "provider": "google", "local": False, "direct_model": "gemini-2.0-flash"},
+        ]
+        cfg = self._cfg_with_members(members)
+        phase1_data = {
+            "prompt": "test",
+            "effective_prompt": "test",
+            "phase2_pending": True,
+            "phase1_drafts": [
+                {"key": "claude", "label": "Claude", "content": "Claude answer",
+                 "elapsed": 0},
+                {"key": "gemini", "label": "Gemini", "error": "timeout",
+                 "elapsed": 10},
+            ],
+        }
+
+        result = asyncio.run(run_phase2_only(phase1_data, cfg=cfg, quiet=True))
+        assert "error" in result
+
+    def test_uses_effective_prompt_for_critique(self):
+        """Session context passed through to Phase 2 via effective_prompt."""
+        members = [
+            {"key": "claude", "label": "Claude", "icon": "🟣",
+             "provider": "anthropic", "local": True, "direct_model": "claude-opus-4.6"},
+            {"key": "gemini", "label": "Gemini", "icon": "🔵",
+             "provider": "google", "local": False, "direct_model": "gemini-2.0-flash"},
+            {"key": "gpt", "label": "GPT", "icon": "🟢",
+             "provider": "openai", "local": False, "direct_model": "gpt-5.2"},
+        ]
+        cfg = self._cfg_with_members(members)
+
+        session_prompt = "PRIOR CONTEXT: first question\n\nCurrent question: follow-up"
+        phase1_data = {
+            "prompt": "follow-up",
+            "system": None,
+            "effective_prompt": session_prompt,
+            "phase2_pending": True,
+            "phase1_drafts": [
+                {"key": "claude", "label": "Claude", "content": "Claude answer",
+                 "elapsed": 0},
+                {"key": "gemini", "label": "Gemini", "content": "Gemini response",
+                 "elapsed": 1.0},
+                {"key": "gpt", "label": "GPT", "content": "GPT response",
+                 "elapsed": 1.2},
+            ],
+        }
+
+        captured_prompts = []
+
+        async def fake_call(member, prompt, system, cfg, **kwargs):
+            captured_prompts.append(prompt)
+            return {"content": '```json\n{"ranking": ["A", "B"]}\n```',
+                    "tokens": 50, "model": "test", "elapsed": 1.0}
+
+        with patch("conclave.orchestrator.call_model", side_effect=fake_call):
+            result = asyncio.run(run_phase2_only(phase1_data, cfg=cfg, quiet=True))
+
+        # The critique prompts should contain session context
+        assert len(captured_prompts) >= 1
+        for p in captured_prompts:
+            assert "PRIOR CONTEXT" in p or "first question" in p

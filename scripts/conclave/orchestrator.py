@@ -146,11 +146,15 @@ async def run_conclave(prompt: str, depth: str = "standard",
         # ── Phase 2 (deep only) ──
         critiques = []
         rankings = {}
+        phase2_pending = False
         # Need at least 2 members with content (API responses) for cross-critique
         if depth == "deep" and (api_ok_count + local_count) >= 2:
-            progress.phase_start(2, "Anonymized cross-critique...")
-            critiques = await phase2(effective_prompt, drafts, members, cfg, templates, progress, client=client)
-            rankings = aggregate_rankings(critiques)
+            if local_count > 0:
+                phase2_pending = True  # defer to Pass 2
+            else:
+                progress.phase_start(2, "Anonymized cross-critique...")
+                critiques = await phase2(effective_prompt, drafts, members, cfg, templates, progress, client=client)
+                rankings = aggregate_rankings(critiques)
 
     # ── Update scoring ──
     _scores = load_scores()
@@ -173,6 +177,8 @@ async def run_conclave(prompt: str, depth: str = "standard",
         "system": system,
         "depth": depth,
         "session_id": session_id,
+        "phase2_pending": phase2_pending,
+        "effective_prompt": effective_prompt if phase2_pending else None,
         "total_elapsed_seconds": total_elapsed,
         "phase1_drafts": drafts,
         "phase2_critiques": critiques,
@@ -187,3 +193,75 @@ async def run_conclave(prompt: str, depth: str = "standard",
         },
     }
     return output
+
+
+async def run_phase2_only(phase1_data: dict,
+                          cfg: Optional[dict] = None,
+                          quiet: bool = False) -> dict:
+    """Run Phase 2 only, using completed Phase 1 data with local drafts filled in.
+
+    Accepts the Phase 1 JSON (with local drafts' content populated),
+    runs cross-critique, updates scoring (rankings only), and returns
+    the complete output.
+    """
+    cfg = cfg or load_config()
+    templates = load_templates()
+    progress = _Progress(quiet=quiet)
+    total_start = time.time()
+
+    effective_prompt = phase1_data.get("effective_prompt")
+    drafts = phase1_data.get("phase1_drafts", [])
+
+    if not effective_prompt:
+        return {"error": "Missing effective_prompt in phase1_data"}
+
+    # Reconstruct members list by matching draft keys against config
+    cfg_members = {m["key"]: m for m in cfg.get("council_members", [])}
+    members = [cfg_members[d["key"]] for d in drafts if d["key"] in cfg_members]
+
+    # Validate: need ≥2 non-error drafts with content
+    ok_drafts = [d for d in drafts
+                 if "error" not in d and d.get("content")]
+    if len(ok_drafts) < 2:
+        return {"error": f"Need ≥2 non-error drafts with content, got {len(ok_drafts)}"}
+
+    timeout = cfg.get("defaults", {}).get("timeout_seconds", 120)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        progress.phase_start(2, "Anonymized cross-critique...")
+        critiques = await phase2(effective_prompt, drafts, members, cfg,
+                                 templates, progress, client=client)
+        rankings = aggregate_rankings(critiques)
+
+    # Update scoring — empty drafts list = no double-counting participations,
+    # only ranking fields updated
+    _scores = load_scores()
+    _scores = record_round(_scores, [], rankings,
+                           alpha=cfg.get("defaults", {}).get("scoring_ema_alpha", 0.3))
+    save_scores(_scores)
+
+    total_elapsed = round(time.time() - total_start, 2)
+    progress.done(total_elapsed)
+
+    return {
+        "prompt": phase1_data.get("prompt"),
+        "system": phase1_data.get("system"),
+        "depth": "deep",
+        "session_id": phase1_data.get("session_id"),
+        "phase2_pending": False,
+        "effective_prompt": None,
+        "total_elapsed_seconds": total_elapsed,
+        "phase1_drafts": drafts,
+        "phase2_critiques": critiques,
+        "aggregate_rankings": rankings,
+        "member_scores": _scores.get("members", {}),
+        "summary": {
+            "models_queried": len(drafts),
+            "api_calls": sum(1 for d in drafts
+                             if "error" not in d
+                             and not d.get("needs_claude_code", False)),
+            "local": sum(1 for d in drafts
+                         if d.get("needs_claude_code", False)),
+            "failed": sum(1 for d in drafts if "error" in d),
+            "critiques": len([c for c in critiques if "error" not in c]),
+        },
+    }

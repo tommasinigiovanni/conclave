@@ -302,7 +302,7 @@ Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thunde
 
 ## Testing
 
-~150 tests with zero API calls (all external calls mocked):
+~157 tests with zero API calls (all external calls mocked):
 
 ```bash
 pip install -e ".[dev]"    # one-time setup (installs pytest + httpx)
@@ -313,7 +313,7 @@ python3 -m pytest tests/ -v
 |------|-------|--------|
 | `test_ranking.py` | 62 | `parse_ranking` (numbered, arrows, comma, standalone, headers, edge cases), `extract_json_ranking`, `validate_ranking`, `parse_ranking_json`, `aggregate_rankings`, `build_critique_prompt`, `build_repair_prompt` |
 | `test_providers.py` | 25 | `_post` retry logic (429/5xx, timeout, connect errors, non-retryable 4xx), `call_model` routing (local placeholder, missing keys, provider dispatch), null content handling (OpenAI/OpenRouter/Anthropic/Gemini) |
-| `test_orchestrator.py` | 16 | `phase1`, `phase2` (critiques, re-prompting, regex fallback, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure, summary counts), `doctor` |
+| `test_orchestrator.py` | 23 | `phase1`, `phase2` (critiques, re-prompting, regex fallback, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure, summary counts), `doctor`, two-pass flow (`phase2_pending` deferral, `run_phase2_only`) |
 | `test_scoring.py` | ~35 | `_ema`, `record_round` (participations, errors, latency EMA, rank EMA, immutability), `get_weights` (floor, normalization, unranked), `get_leaderboard` (sorting, ranked vs unranked), file I/O (roundtrip, corrupt, missing, wrong version), `print_leaderboard` |
 | `test_sessions.py` | 14 | `_format_turn`, `_build_context_prompt` (basic, token budget truncation, preserves recent turns), `_record_turn` (append, summarize, error/local drafts) |
 
@@ -321,6 +321,7 @@ python3 -m pytest tests/ -v
 
 ```
 conclave.py <prompt> [options]
+conclave.py phase2 <file> [--raw]   Run Phase 2 from completed Phase 1 JSON
 conclave.py doctor                  Health check all models
 conclave.py sessions                List saved sessions
 conclave.py leaderboard             Show model scoring leaderboard
@@ -364,7 +365,7 @@ conclave/
 │   ├── test_providers.py   ← HTTP retry logic, call_model routing, null content (25 tests)
 │   ├── test_scoring.py     ← EMA, record_round, weights, leaderboard, file I/O (~35 tests)
 │   ├── test_sessions.py    ← Context building, token budget truncation (14 tests)
-│   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor (16 tests)
+│   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor, two-pass flow (23 tests)
 └── README.md
 
 ~/.config/conclave/
