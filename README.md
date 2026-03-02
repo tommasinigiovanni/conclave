@@ -281,6 +281,12 @@ python3 scripts/conclave.py sessions
 
 Sessions are stored as JSON files in `~/.config/conclave/sessions/`. Each model receives the full conversation history (all models' prior answers, summarized) as context. Without `--session`, behavior is single-turn as before.
 
+Long sessions are automatically truncated: when prior turns exceed the token budget, the oldest turns are dropped (most recent kept). Configure via `.env`:
+
+```bash
+CONCLAVE_SESSION_TOKEN_BUDGET=20000  # max tokens for session context (default: 20000)
+```
+
 ## Retry and Resilience
 
 API calls automatically retry with **exponential backoff** on transient failures (429, 5xx, timeouts, connection errors). Configurable via `.env`:
@@ -295,7 +301,7 @@ Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thunde
 
 ## Testing
 
-97 tests with zero API calls (all external calls mocked):
+117 tests with zero API calls (all external calls mocked):
 
 ```bash
 pip install -e ".[dev]"    # one-time setup (installs pytest + httpx)
@@ -305,8 +311,9 @@ python3 -m pytest tests/ -v
 | File | Tests | Covers |
 |------|-------|--------|
 | `test_ranking.py` | 62 | `parse_ranking` (numbered, arrows, comma, standalone, headers, edge cases), `extract_json_ranking`, `validate_ranking`, `parse_ranking_json`, `aggregate_rankings`, `build_critique_prompt`, `build_repair_prompt` |
-| `test_providers.py` | 19 | `_post` retry logic (429/5xx, timeout, connect errors, non-retryable 4xx), `call_model` routing (local placeholder, missing keys, provider dispatch) |
+| `test_providers.py` | 25 | `_post` retry logic (429/5xx, timeout, connect errors, non-retryable 4xx), `call_model` routing (local placeholder, missing keys, provider dispatch), null content handling (OpenAI/OpenRouter/Anthropic/Gemini) |
 | `test_orchestrator.py` | 16 | `phase1`, `phase2` (critiques, re-prompting, regex fallback, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure, summary counts), `doctor` |
+| `test_sessions.py` | 14 | `_format_turn`, `_build_context_prompt` (basic, token budget truncation, preserves recent turns), `_record_turn` (append, summarize, error/local drafts) |
 
 ## CLI Reference
 
@@ -350,7 +357,8 @@ conclave/
 ├── tests/
 │   ├── conftest.py         ← sys.path setup for imports
 │   ├── test_ranking.py     ← Ranking parser, JSON extraction, aggregation, critique prompts (62 tests)
-│   ├── test_providers.py   ← HTTP retry logic, call_model routing (19 tests)
+│   ├── test_providers.py   ← HTTP retry logic, call_model routing, null content (25 tests)
+│   ├── test_sessions.py    ← Context building, token budget truncation (14 tests)
 │   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor (16 tests)
 └── README.md
 
@@ -391,12 +399,13 @@ PRs welcome! Ideas:
 - [x] Robust ranking parser (regex + structured prompts)
 - [x] Multi-turn conversation memory (`--session`)
 - [x] Modular package architecture (config, providers, ranking, sessions, cost, orchestrator, cli)
-- [x] Test suite — ranking parser, retry logic, phase orchestration (97 tests, pytest)
+- [x] Test suite — ranking parser, retry logic, phase orchestration, sessions (117 tests, pytest)
 - [x] `pyproject.toml` — installable package with `pip install`, CLI entry point, optional deps
 - [x] HTTP connection pooling — shared `httpx.AsyncClient` across all API calls in a session
+- [x] Null content handling — safe extraction when APIs return `content: null` (reasoning models)
 - [ ] Web UI for visualizing debates
 - [ ] Export debate transcripts to Markdown
-- [ ] Token budget management (auto-truncate long sessions)
+- [x] Token budget management (auto-truncate long sessions)
 
 ## Acknowledgments
 

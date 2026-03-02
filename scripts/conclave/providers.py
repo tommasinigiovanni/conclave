@@ -55,7 +55,7 @@ async def _call_anthropic(prompt: str, model: str, system: Optional[str],
         "x-api-key": api_key, "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }, body, timeout, max_retries, retry_base_delay, client=client)
-    text = "\n".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    text = "\n".join((b.get("text") or "") for b in data.get("content", []) if b.get("type") == "text")
     usage = data.get("usage", {})
     return {"content": text, "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             "model": data.get("model", model)}
@@ -77,7 +77,7 @@ async def _call_gemini(prompt: str, model: str, system: Optional[str],
     candidates = data.get("candidates", [])
     text = ""
     if candidates:
-        text = "\n".join(p.get("text", "") for p in candidates[0].get("content", {}).get("parts", []))
+        text = "\n".join((p.get("text") or "") for p in candidates[0].get("content", {}).get("parts", []))
     tokens = data.get("usageMetadata", {}).get("totalTokenCount")
     return {"content": text, "tokens": tokens, "model": model}
 
@@ -104,7 +104,7 @@ async def _call_openai(prompt: str, model: str, system: Optional[str],
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
     }, body, timeout, max_retries, retry_base_delay, client=client)
     choices = data.get("choices", [])
-    text = choices[0]["message"]["content"] if choices else ""
+    text = (choices[0]["message"].get("content") or "") if choices else ""
     tokens = data.get("usage", {}).get("total_tokens")
     return {"content": text, "tokens": tokens, "model": data.get("model", model)}
 
@@ -122,7 +122,7 @@ async def _call_openrouter(prompt: str, model: str, system: Optional[str],
     }, {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tok},
         timeout, max_retries, retry_base_delay, client=client)
     choices = data.get("choices", [])
-    text = choices[0]["message"]["content"] if choices else ""
+    text = (choices[0]["message"].get("content") or "") if choices else ""
     tokens = data.get("usage", {}).get("total_tokens")
     return {"content": text, "tokens": tokens, "model": model}
 

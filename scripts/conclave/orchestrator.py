@@ -127,7 +127,8 @@ async def run_conclave(prompt: str, depth: str = "standard",
     # ── Build context-enriched prompt if continuing a session ──
     effective_prompt = prompt
     if session and session.get("turns"):
-        effective_prompt = _build_context_prompt(session, prompt)
+        token_budget = cfg.get("defaults", {}).get("session_token_budget", 20000)
+        effective_prompt = _build_context_prompt(session, prompt, token_budget)
         progress._emit(f"  Session {session['id']} — turn {len(session['turns']) + 1}")
 
     progress.header(depth, len(members))

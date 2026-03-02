@@ -116,6 +116,7 @@ def load_config() -> dict:
             "timeout_seconds": int(_env("CONCLAVE_TIMEOUT", env_file, "120")),
             "max_retries": int(_env("CONCLAVE_MAX_RETRIES", env_file, "3")),
             "retry_base_delay": float(_env("CONCLAVE_RETRY_BASE_DELAY", env_file, "1.0")),
+            "session_token_budget": int(_env("CONCLAVE_SESSION_TOKEN_BUDGET", env_file, "20000")),
         },
         "anonymize_reviews": _env("CONCLAVE_ANONYMIZE", env_file, "true").lower() == "true",
     }

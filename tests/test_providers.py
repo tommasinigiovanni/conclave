@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from conclave.providers import _post, call_model
+from conclave.providers import (
+    _post, call_model, _call_openai, _call_openrouter, _call_anthropic, _call_gemini,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -241,3 +243,84 @@ class TestCallModel:
         assert "error" in result
         assert "boom" in result["error"]
         assert "elapsed" in result
+
+
+# ── Null content handling ────────────────────────────────────────
+
+
+class TestNullContentHandling:
+    """Reasoning models (gpt-5.x, o1, etc.) may return content: null."""
+
+    def test_openai_null_content_returns_empty_string(self):
+        api_response = {
+            "choices": [{"message": {"role": "assistant", "content": None}}],
+            "usage": {"total_tokens": 500},
+            "model": "gpt-5.2",
+        }
+        with patch("conclave.providers._post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = api_response
+            result = asyncio.run(
+                _call_openai("test", "gpt-5.2", None, "key", 0.7, 100, 10)
+            )
+        assert result["content"] == ""
+        assert result["tokens"] == 500
+
+    def test_openai_missing_content_key_returns_empty_string(self):
+        api_response = {
+            "choices": [{"message": {"role": "assistant"}}],
+            "usage": {"total_tokens": 200},
+            "model": "o3",
+        }
+        with patch("conclave.providers._post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = api_response
+            result = asyncio.run(
+                _call_openai("test", "o3", None, "key", 0.7, 100, 10)
+            )
+        assert result["content"] == ""
+
+    def test_openai_empty_choices_returns_empty_string(self):
+        api_response = {"choices": [], "usage": {"total_tokens": 0}, "model": "gpt-5.2"}
+        with patch("conclave.providers._post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = api_response
+            result = asyncio.run(
+                _call_openai("test", "gpt-5.2", None, "key", 0.7, 100, 10)
+            )
+        assert result["content"] == ""
+
+    def test_openrouter_null_content_returns_empty_string(self):
+        api_response = {
+            "choices": [{"message": {"role": "assistant", "content": None}}],
+            "usage": {"total_tokens": 300},
+        }
+        with patch("conclave.providers._post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = api_response
+            result = asyncio.run(
+                _call_openrouter("test", "model-x", None, "key", 0.7, 100, 10)
+            )
+        assert result["content"] == ""
+        assert result["tokens"] == 300
+
+    def test_anthropic_null_text_in_block_returns_empty_string(self):
+        api_response = {
+            "content": [{"type": "text", "text": None}],
+            "usage": {"input_tokens": 10, "output_tokens": 0},
+            "model": "claude-sonnet-4-20250514",
+        }
+        with patch("conclave.providers._post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = api_response
+            result = asyncio.run(
+                _call_anthropic("test", "claude-sonnet-4-20250514", None, "key", 0.7, 100, 10)
+            )
+        assert result["content"] == ""
+
+    def test_gemini_null_text_in_parts_returns_empty_string(self):
+        api_response = {
+            "candidates": [{"content": {"parts": [{"text": None}]}}],
+            "usageMetadata": {"totalTokenCount": 50},
+        }
+        with patch("conclave.providers._post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = api_response
+            result = asyncio.run(
+                _call_gemini("test", "gemini-pro", None, "key", 0.7, 100, 10)
+            )
+        assert result["content"] == ""

@@ -8,6 +8,8 @@ from pathlib import Path
 
 _SESSIONS_DIR = Path.home() / ".config" / "conclave" / "sessions"
 _SUMMARY_MAX_CHARS = 300
+_DEFAULT_TOKEN_BUDGET = 20000  # max tokens for session context (prior turns)
+_CHARS_PER_TOKEN = 4  # approximate, same heuristic as cost.py
 
 
 class _SessionStore:
@@ -101,20 +103,43 @@ def _summarize_draft(draft: dict) -> str:
     return content
 
 
-def _build_context_prompt(session: dict, current_prompt: str) -> str:
-    """Prepend summarized prior turns to the current prompt."""
+def _format_turn(index: int, turn: dict) -> str:
+    """Format a single turn as text."""
+    lines = [f"### Turn {index} — \"{turn['prompt'][:80]}\""]
+    for d in turn.get("drafts", []):
+        label = d.get("label", d.get("key", "?"))
+        lines.append(f"**{label}:** {d['summary']}")
+    lines.append("")  # blank line after turn
+    return "\n".join(lines)
+
+
+def _build_context_prompt(session: dict, current_prompt: str,
+                          token_budget: int = _DEFAULT_TOKEN_BUDGET) -> str:
+    """Prepend summarized prior turns to the current prompt.
+
+    When the session history exceeds *token_budget* (estimated as chars/4),
+    the oldest turns are dropped and a note is inserted.
+    """
     turns = session.get("turns", [])
     if not turns:
         return current_prompt
 
-    parts = ["## Prior conversation\n"]
-    for i, turn in enumerate(turns, 1):
-        parts.append(f"### Turn {i} — \"{turn['prompt'][:80]}\"")
-        for d in turn.get("drafts", []):
-            label = d.get("label", d.get("key", "?"))
-            parts.append(f"**{label}:** {d['summary']}")
-        parts.append("")  # blank line between turns
+    char_budget = token_budget * _CHARS_PER_TOKEN
 
+    # Format all turns (most recent last), then trim oldest if over budget
+    formatted = [_format_turn(i, t) for i, t in enumerate(turns, 1)]
+    total_chars = sum(len(f) for f in formatted)
+    dropped = 0
+
+    while total_chars > char_budget and len(formatted) > 1:
+        total_chars -= len(formatted[0])
+        formatted.pop(0)
+        dropped += 1
+
+    parts = ["## Prior conversation\n"]
+    if dropped:
+        parts.append(f"*[{dropped} earlier turn(s) omitted for brevity]*\n")
+    parts.extend(formatted)
     parts.append("---\n")
     parts.append("## Current question")
     parts.append(current_prompt)
