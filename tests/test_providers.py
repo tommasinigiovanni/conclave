@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from conclave.providers import (
-    _post, call_model, _call_openai, _call_openrouter, _call_anthropic, _call_gemini,
+    _post, call_model, _call_openai, _call_openrouter, _call_anthropic, _call_gemini, _call_xai,
 )
 
 
@@ -166,7 +166,7 @@ class TestCallModel:
     def _cfg(self, **overrides):
         base = {
             "provider_mode": "direct",
-            "direct_keys": {"anthropic": "sk-test", "google": "gk-test", "openai": "ok-test"},
+            "direct_keys": {"anthropic": "sk-test", "google": "gk-test", "openai": "ok-test", "xai": "xai-test"},
             "openrouter": {"api_key": ""},
             "defaults": {
                 "temperature": 0.7, "max_tokens": 100,
@@ -221,6 +221,15 @@ class TestCallModel:
                   "direct_model": "gemini-2.0-flash"}
         with patch("conclave.providers._call_gemini", new_callable=AsyncMock) as mock_call:
             mock_call.return_value = {"content": "ok", "tokens": 5, "model": "gemini-2.0-flash"}
+            result = asyncio.run(call_model(member, "test", None, self._cfg()))
+        assert result["content"] == "ok"
+        mock_call.assert_called_once()
+
+    def test_routes_to_xai(self):
+        member = {"key": "grok", "provider": "xai", "local": False,
+                  "direct_model": "grok-3"}
+        with patch("conclave.providers._call_xai", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = {"content": "ok", "tokens": 12, "model": "grok-3"}
             result = asyncio.run(call_model(member, "test", None, self._cfg()))
         assert result["content"] == "ok"
         mock_call.assert_called_once()
@@ -312,6 +321,20 @@ class TestNullContentHandling:
                 _call_anthropic("test", "claude-sonnet-4-20250514", None, "key", 0.7, 100, 10)
             )
         assert result["content"] == ""
+
+    def test_xai_null_content_returns_empty_string(self):
+        api_response = {
+            "choices": [{"message": {"role": "assistant", "content": None}}],
+            "usage": {"total_tokens": 400},
+            "model": "grok-3",
+        }
+        with patch("conclave.providers._post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = api_response
+            result = asyncio.run(
+                _call_xai("test", "grok-3", None, "key", 0.7, 100, 10)
+            )
+        assert result["content"] == ""
+        assert result["tokens"] == 400
 
     def test_gemini_null_text_in_parts_returns_empty_string(self):
         api_response = {

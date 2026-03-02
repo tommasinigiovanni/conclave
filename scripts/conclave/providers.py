@@ -109,6 +109,25 @@ async def _call_openai(prompt: str, model: str, system: Optional[str],
     return {"content": text, "tokens": tokens, "model": data.get("model", model)}
 
 
+async def _call_xai(prompt: str, model: str, system: Optional[str],
+                    api_key: str, temp: float, max_tok: int, timeout: int,
+                    max_retries: int = 3, retry_base_delay: float = 1.0,
+                    *, client: httpx.AsyncClient | None = None) -> dict:
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    body: dict = {"model": model, "messages": messages,
+                  "temperature": temp, "max_tokens": max_tok}
+    data = await _post("https://api.x.ai/v1/chat/completions", {
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+    }, body, timeout, max_retries, retry_base_delay, client=client)
+    choices = data.get("choices", [])
+    text = (choices[0]["message"].get("content") or "") if choices else ""
+    tokens = data.get("usage", {}).get("total_tokens")
+    return {"content": text, "tokens": tokens, "model": data.get("model", model)}
+
+
 async def _call_openrouter(prompt: str, model: str, system: Optional[str],
                            api_key: str, temp: float, max_tok: int, timeout: int,
                            max_retries: int = 3, retry_base_delay: float = 1.0,
@@ -169,6 +188,7 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
                 "anthropic": _call_anthropic,
                 "google": _call_gemini,
                 "openai": _call_openai,
+                "xai": _call_xai,
             }
             caller_fn = caller_map.get(provider)
             if not caller_fn:
