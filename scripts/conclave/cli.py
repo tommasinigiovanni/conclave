@@ -8,6 +8,7 @@ import sys
 from .config import load_config
 from .cost import estimate_cost, print_estimate
 from .orchestrator import doctor, run_conclave
+from .scoring import load_scores, print_leaderboard
 from .sessions import _SessionStore
 
 
@@ -100,6 +101,10 @@ def main():
         print()
         sys.exit(0)
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "leaderboard":
+        print_leaderboard(load_scores())
+        sys.exit(0)
+
     if len(sys.argv) >= 2 and sys.argv[1] == "sessions":
         _print_session_list()
 
@@ -115,6 +120,7 @@ Examples:
   conclave.py --session last "Now explain PACELC"
   conclave.py --session 20260301-143022 "And Raft consensus?"
   conclave.py sessions
+  conclave.py leaderboard
   conclave.py doctor
         """,
     )

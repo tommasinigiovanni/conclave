@@ -72,6 +72,7 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 | **3 depth levels** | ✅ quick/standard/deep | ❌ Always full | ❌ Always full |
 | **Anonymized review** | ✅ | ✅ | ❌ |
 | **Aggregate ranking** | ✅ | ✅ | ❌ |
+| **Scoring & leaderboard** | ✅ EMA-based | ❌ | ❌ |
 | **Multi-turn sessions** | ✅ `--session` | ❌ | ❌ |
 | **Cost estimation** | ✅ `--estimate` | ❌ | ❌ |
 | **Real-time progress** | ✅ stderr progress | ❌ | ❌ |
@@ -301,7 +302,7 @@ Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thunde
 
 ## Testing
 
-117 tests with zero API calls (all external calls mocked):
+~150 tests with zero API calls (all external calls mocked):
 
 ```bash
 pip install -e ".[dev]"    # one-time setup (installs pytest + httpx)
@@ -313,6 +314,7 @@ python3 -m pytest tests/ -v
 | `test_ranking.py` | 62 | `parse_ranking` (numbered, arrows, comma, standalone, headers, edge cases), `extract_json_ranking`, `validate_ranking`, `parse_ranking_json`, `aggregate_rankings`, `build_critique_prompt`, `build_repair_prompt` |
 | `test_providers.py` | 25 | `_post` retry logic (429/5xx, timeout, connect errors, non-retryable 4xx), `call_model` routing (local placeholder, missing keys, provider dispatch), null content handling (OpenAI/OpenRouter/Anthropic/Gemini) |
 | `test_orchestrator.py` | 16 | `phase1`, `phase2` (critiques, re-prompting, regex fallback, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure, summary counts), `doctor` |
+| `test_scoring.py` | ~35 | `_ema`, `record_round` (participations, errors, latency EMA, rank EMA, immutability), `get_weights` (floor, normalization, unranked), `get_leaderboard` (sorting, ranked vs unranked), file I/O (roundtrip, corrupt, missing, wrong version), `print_leaderboard` |
 | `test_sessions.py` | 14 | `_format_turn`, `_build_context_prompt` (basic, token budget truncation, preserves recent turns), `_record_turn` (append, summarize, error/local drafts) |
 
 ## CLI Reference
@@ -321,6 +323,7 @@ python3 -m pytest tests/ -v
 conclave.py <prompt> [options]
 conclave.py doctor                  Health check all models
 conclave.py sessions                List saved sessions
+conclave.py leaderboard             Show model scoring leaderboard
 
 Options:
   --depth {quick,standard,deep}     Depth level (default: standard)
@@ -345,12 +348,13 @@ conclave/
 ├── scripts/
 │   ├── conclave.py         ← Slim CLI entry point (imports from package)
 │   └── conclave/           ← Core package (1 dependency: httpx)
-│       ├── __init__.py     ← Public API: run_conclave, load_config, doctor, estimate_cost
+│       ├── __init__.py     ← Public API: run_conclave, load_config, doctor, estimate_cost, scoring
 │       ├── config.py       ← .env loading, member discovery, templates
 │       ├── providers.py    ← HTTP retry, Anthropic/Gemini/OpenAI/OpenRouter callers
 │       ├── ranking.py      ← Ranking extraction, aggregation, critique prompts
 │       ├── sessions.py     ← Multi-turn session store and context building
 │       ├── progress.py     ← Real-time stderr progress reporting
+│       ├── scoring.py      ← EMA-based model scoring, weights, and leaderboard
 │       ├── cost.py         ← Pricing data and cost estimation
 │       ├── orchestrator.py ← Phase 1/2 orchestration, run_conclave, doctor
 │       └── cli.py          ← argparse, pretty printing, main()
@@ -358,12 +362,14 @@ conclave/
 │   ├── conftest.py         ← sys.path setup for imports
 │   ├── test_ranking.py     ← Ranking parser, JSON extraction, aggregation, critique prompts (62 tests)
 │   ├── test_providers.py   ← HTTP retry logic, call_model routing, null content (25 tests)
+│   ├── test_scoring.py     ← EMA, record_round, weights, leaderboard, file I/O (~35 tests)
 │   ├── test_sessions.py    ← Context building, token budget truncation (14 tests)
 │   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor (16 tests)
 └── README.md
 
 ~/.config/conclave/
 ├── .env                    ← API keys and model config
+├── scores.json             ← Model scoring data (auto-created)
 └── sessions/               ← Multi-turn session files (auto-created)
     └── 20260301-143022-abcd.json
 ```
@@ -399,7 +405,8 @@ PRs welcome! Ideas:
 - [x] Robust ranking parser (regex + structured prompts)
 - [x] Multi-turn conversation memory (`--session`)
 - [x] Modular package architecture (config, providers, ranking, sessions, cost, orchestrator, cli)
-- [x] Test suite — ranking parser, retry logic, phase orchestration, sessions (117 tests, pytest)
+- [x] Model scoring — EMA-based performance tracking, weights, and leaderboard (`leaderboard` command)
+- [x] Test suite — ranking parser, retry logic, phase orchestration, sessions, scoring (~150 tests, pytest)
 - [x] `pyproject.toml` — installable package with `pip install`, CLI entry point, optional deps
 - [x] HTTP connection pooling — shared `httpx.AsyncClient` across all API calls in a session
 - [x] Null content handling — safe extraction when APIs return `content: null` (reasoning models)

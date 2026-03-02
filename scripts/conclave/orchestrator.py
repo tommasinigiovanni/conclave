@@ -13,6 +13,7 @@ from .ranking import (
     aggregate_rankings, build_critique_prompt, build_repair_prompt,
     parse_ranking, parse_ranking_json,
 )
+from .scoring import load_scores, record_round, save_scores
 from .sessions import _SessionStore, _build_context_prompt, _record_turn
 
 
@@ -151,6 +152,12 @@ async def run_conclave(prompt: str, depth: str = "standard",
             critiques = await phase2(effective_prompt, drafts, members, cfg, templates, progress, client=client)
             rankings = aggregate_rankings(critiques)
 
+    # ── Update scoring ──
+    _scores = load_scores()
+    _scores = record_round(_scores, drafts, rankings,
+                           alpha=cfg.get("defaults", {}).get("scoring_ema_alpha", 0.3))
+    save_scores(_scores)
+
     # ── Save turn to session ──
     session_id = None
     if session is not None:
@@ -170,6 +177,7 @@ async def run_conclave(prompt: str, depth: str = "standard",
         "phase1_drafts": drafts,
         "phase2_critiques": critiques,
         "aggregate_rankings": rankings,
+        "member_scores": _scores.get("members", {}),
         "summary": {
             "models_queried": len(drafts),
             "api_calls": api_ok_count,
