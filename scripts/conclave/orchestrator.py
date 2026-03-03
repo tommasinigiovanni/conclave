@@ -34,7 +34,12 @@ async def doctor(cfg: dict) -> list[dict]:
         report.append({"member": m["label"], "icon": m.get("icon", ""),
                         "status": "🏠 Local (Claude Code)"})
     for m, r in zip(remote_members, results):
-        status = "❌ " + r.get("error", "unknown") if "error" in r else f"✅ {r['elapsed']}s"
+        if "error" in r:
+            status = "❌ " + r.get("error", "unknown")
+        elif r.get("fallback"):
+            status = f"✅ {r['elapsed']}s (fallback → {r['model']})"
+        else:
+            status = f"✅ {r['elapsed']}s"
         report.append({"member": m["label"], "icon": m.get("icon", ""), "status": status})
     return report
 

@@ -43,9 +43,10 @@ def _discover_members(env_file: dict[str, str]) -> list[dict]:
     all_keys = set(os.environ.keys()) | set(env_file.keys())
 
     # Find unique member keys: CONCLAVE_MEMBER_<KEY>_MODEL
+    # Exclude FALLBACK_MODEL (suffix _FALLBACK_MODEL) which is a sub-option, not a member
     member_keys = set()
     for k in all_keys:
-        if k.startswith("CONCLAVE_MEMBER_") and k.endswith("_MODEL"):
+        if k.startswith("CONCLAVE_MEMBER_") and k.endswith("_MODEL") and not k.endswith("_FALLBACK_MODEL"):
             member_key = k.replace("CONCLAVE_MEMBER_", "").replace("_MODEL", "")
             member_keys.add(member_key)
 
@@ -55,7 +56,8 @@ def _discover_members(env_file: dict[str, str]) -> list[dict]:
         model = _env(f"{prefix}MODEL", env_file)
         if not model:
             continue
-        members.append({
+        fallback = _env(f"{prefix}FALLBACK_MODEL", env_file)
+        member: dict = {
             "key": mk.lower(),
             "label": _env(f"{prefix}LABEL", env_file, mk.capitalize()),
             "icon": _env(f"{prefix}ICON", env_file, "⚪"),
@@ -63,7 +65,10 @@ def _discover_members(env_file: dict[str, str]) -> list[dict]:
             "direct_model": model,
             "openrouter_model": _env(f"{prefix}OPENROUTER", env_file, model),
             "local": _env(f"{prefix}LOCAL", env_file, "false").lower() == "true",
-        })
+        }
+        if fallback:
+            member["fallback_model"] = fallback
+        members.append(member)
     return members
 
 

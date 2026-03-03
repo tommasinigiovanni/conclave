@@ -206,8 +206,23 @@ async def call_model(member: dict, prompt: str, system: Optional[str],
                 if not api_key:
                     return {"error": f"API key for {provider} not set", "elapsed": 0}
                 model_id = member.get("direct_model", "")
-                result = await caller_fn(prompt, model_id, system, api_key, temp, max_tok,
-                                         timeout, max_retries, retry_base_delay, client=client)
+                fallback_model = member.get("fallback_model")
+                if fallback_model:
+                    # Try primary with short timeout and no retries — fall back fast
+                    fallback_timeout = min(30, timeout)
+                    try:
+                        result = await caller_fn(prompt, model_id, system, api_key, temp, max_tok,
+                                                 fallback_timeout, max_retries=0,
+                                                 retry_base_delay=retry_base_delay)
+                    except Exception as primary_err:
+                        result = await caller_fn(prompt, fallback_model, system, api_key, temp, max_tok,
+                                                 timeout, max_retries, retry_base_delay, client=client)
+                        result["fallback"] = True
+                        result["primary_model"] = model_id
+                        result["primary_error"] = str(primary_err)
+                else:
+                    result = await caller_fn(prompt, model_id, system, api_key, temp, max_tok,
+                                             timeout, max_retries, retry_base_delay, client=client)
 
         result["elapsed"] = round(time.time() - start, 2)
         return result
