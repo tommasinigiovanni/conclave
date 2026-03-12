@@ -72,6 +72,9 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 | **3 depth levels** | ✅ quick/standard/deep | ❌ Always full | ❌ Always full |
 | **Anonymized review** | ✅ | ✅ | ❌ |
 | **Aggregate ranking** | ✅ | ✅ | ❌ |
+| **Quorum voting** | ✅ `--vote` (100-point distribution) | ❌ | ❌ |
+| **Multi-round dialogue** | ✅ `--rounds N` (convergence detection) | ❌ | ❌ |
+| **Bias tracking** | ✅ `bias` command | ❌ | ❌ |
 | **Scoring & leaderboard** | ✅ EMA-based | ❌ | ❌ |
 | **Multi-turn sessions** | ✅ `--session` | ❌ | ❌ |
 | **Cost estimation** | ✅ `--estimate` | ❌ | ❌ |
@@ -140,6 +143,15 @@ OPENROUTER_API_KEY=sk-or-...         # https://openrouter.ai/keys
 
 # Quick sanity check:
 /conclave quick What's the time complexity of quicksort?
+
+# Quorum voting — models score each other with points:
+/conclave vote Which caching strategy is best for this use case?
+
+# Multi-round dialogue — models refine answers iteratively:
+/conclave --rounds 3 Should we use microservices or a monolith?
+
+# Combined voting + dialogue:
+/conclave vote --rounds 2 Compare Kafka vs RabbitMQ for our workload
 ```
 
 ### 4. Health check
@@ -153,13 +165,15 @@ python3 scripts/conclave.py doctor
   🟢 GPT:     ✅ 1.5s
 ```
 
-## 3 Depth Levels
+## 5 Modes
 
 | Command | What happens | Time | Cost | Best for |
 |---------|-------------|------|------|----------|
 | `/conclave quick` | 3 parallel answers → light merge | ~10s | 1x | Facts, sanity checks |
 | `/conclave` | 3 parallel answers → Claude Code synthesis | ~15s | 1x | Analysis, code review |
 | `/conclave deep` | 3 answers → anonymous critique → debate synthesis | ~30s | 2x | Architecture, security |
+| `/conclave vote` | 3 answers → point-based voting → weighted synthesis | ~30s | 2x | Comparative evaluation |
+| `/conclave --rounds 3` | 3 answers → critique → 2 refinement rounds | ~45s | 3x | Consensus building |
 
 ## How Deep Mode Works
 
@@ -195,6 +209,87 @@ Final Answer: "Use PostgreSQL as primary with a caching layer (Redis)..."
 ```
 
 The anonymization is key — without it, models tend to agree with "famous" models.
+
+## How Voting Mode Works
+
+Instead of ordinal ranking (1st, 2nd, 3rd), each model distributes **exactly 100 points** among the others' responses. Models **cannot vote for themselves** — responses are anonymized.
+
+```bash
+/conclave vote Which caching strategy is best for this use case?
+```
+
+```
+Phase 1 — Independent answers (same as standard)
+
+Phase 2 — Quorum voting:
+  Gemini:  Claude 60pts, GPT 40pts
+  GPT:     Claude 55pts, Gemini 45pts
+  Claude:  GPT 50pts, Gemini 50pts
+
+Weighted Scores: Claude 115pts, GPT 90pts, Gemini 95pts
+Consensus Strength: 57.5% (moderate agreement)
+```
+
+This gives finer-grained signal than ordinal ranking — you can distinguish "slight preference" from "strong preference".
+
+## How Multi-Round Dialogue Works
+
+After Phase 1 + Phase 2, models enter additional rounds where they see the critiques they received and can **revise, defend, or converge**:
+
+```bash
+/conclave --rounds 3 Should we use microservices or a monolith?
+```
+
+```
+Round 1 — Independent answers (Phase 1)
+Round 2 — Each model sees critiques, responds with:
+  CONVERGE: "I agree, the monolith-first approach is better"
+  MAINTAIN: "I stand by microservices, here's why..."
+  UPDATE:   "I partially agree — start monolith, split later"
+Round 3 — Another iteration (or early termination if all converge)
+```
+
+**Early termination**: If all models start with `CONVERGE:` in the same round, the dialogue stops early.
+
+Combine with voting: `--vote --rounds 2` runs voting first, then a dialogue round.
+
+Config in `.env`:
+```bash
+CONCLAVE_MAX_ROUNDS=3              # Hard cap (default: 3)
+CONCLAVE_CONVERGENCE_THRESHOLD=0.85 # For early termination
+```
+
+## Bias & Impartiality Tracking
+
+Track how models vote across runs to detect systematic biases:
+
+```bash
+python3 scripts/conclave.py bias
+
+═══════════════════════════════════════════════════════
+  📊 CONCLAVE — Bias & Impartiality Report
+═══════════════════════════════════════════════════════
+  Total runs tracked: 15
+
+  Per-Model Statistics
+  gemini        avg given: 50.0  avg received: 48.3
+  gpt           avg given: 50.0  avg received: 51.7
+  claude        avg given: 50.0  avg received: 55.2
+
+  Consensus by Mode
+  vote          avg consensus: 0.620
+  dialogue      avg consensus: 0.750
+
+  Most Contested Run
+  Topic:     Compare microservices vs monolith for...
+  Consensus: 0.340
+```
+
+Data is stored in `~/.config/conclave/bias.json` and updated automatically after every `--vote` or `--rounds` run. Disable with:
+
+```bash
+CONCLAVE_BIAS_TRACKING=false
+```
 
 ## Configuration
 
@@ -246,6 +341,12 @@ python3 scripts/conclave.py "Explain CRDT" --depth deep --estimate
 ```
 
 Combine with `--raw` for machine-readable JSON output. Local members (Claude Code) are always free.
+
+Supports `--vote` and `--rounds` for accurate estimates:
+```bash
+python3 scripts/conclave.py "Compare approaches" --vote --estimate
+python3 scripts/conclave.py "Deep debate" --rounds 3 --estimate
+```
 
 ## Real-Time Progress
 
@@ -302,7 +403,7 @@ Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thunde
 
 ## Testing
 
-~157 tests with zero API calls (all external calls mocked):
+223 tests with zero API calls (all external calls mocked):
 
 ```bash
 pip install -e ".[dev]"    # one-time setup (installs pytest + httpx)
@@ -316,6 +417,9 @@ python3 -m pytest tests/ -v
 | `test_orchestrator.py` | 23 | `phase1`, `phase2` (critiques, re-prompting, regex fallback, skip failed, <2 ok drafts), `run_conclave` (quick/standard/deep, member filtering, output structure, summary counts), `doctor`, two-pass flow (`phase2_pending` deferral, `run_phase2_only`) |
 | `test_scoring.py` | ~35 | `_ema`, `record_round` (participations, errors, latency EMA, rank EMA, immutability), `get_weights` (floor, normalization, unranked), `get_leaderboard` (sorting, ranked vs unranked), file I/O (roundtrip, corrupt, missing, wrong version), `print_leaderboard` |
 | `test_sessions.py` | 14 | `_format_turn`, `_build_context_prompt` (basic, token budget truncation, preserves recent turns), `_record_turn` (append, summarize, error/local drafts) |
+| `test_voting.py` | 16 | `parse_vote_response` (clean/fenced/bare JSON, invalid, missing letters, normalization, floats), `aggregate_votes` (basic, errors, consensus strength, 3 voters), `build_vote_prompt`, `votes_to_ranking_fallback` |
+| `test_dialogue.py` | 16 | `detect_stance` (converge/maintain/update/unknown), `build_round_prompt`, `check_convergence`, `extract_critiques_for_model`, `run_dialogue_rounds` (correct rounds, early termination, mid-round failure, max cap, vote combo), `get_max_rounds` |
+| `test_bias.py` | 14 | `load_bias_data` (missing/valid/corrupt), `save_bias_data`, `record_vote_run` (append, tracking disabled), `is_tracking_enabled`, `compute_metrics` (empty, single run, most contested, multi-mode, per-model stats) |
 
 ## CLI Reference
 
@@ -325,14 +429,17 @@ conclave.py phase2 <file> [--raw]   Run Phase 2 from completed Phase 1 JSON
 conclave.py doctor                  Health check all models
 conclave.py sessions                List saved sessions
 conclave.py leaderboard             Show model scoring leaderboard
+conclave.py bias                    Bias & impartiality report
 
 Options:
   --depth {quick,standard,deep}     Depth level (default: standard)
+  --vote                            Quorum voting (100-point distribution)
+  --rounds N                        Multi-round dialogue (2-3 rounds typical)
   --members claude,gemini           Comma-separated member keys
   --system "..."                    System prompt for all models
   --raw                             JSON-only output on stdout
   --quiet, -q                       Suppress stderr progress
-  --estimate                        Estimate cost and exit
+  --estimate                        Estimate cost (supports --vote, --rounds)
   --session {new,last,<id>}         Multi-turn conversation session
 ```
 
@@ -349,15 +456,18 @@ conclave/
 ├── scripts/
 │   ├── conclave.py         ← Slim CLI entry point (imports from package)
 │   └── conclave/           ← Core package (1 dependency: httpx)
-│       ├── __init__.py     ← Public API: run_conclave, load_config, doctor, estimate_cost, scoring
+│       ├── __init__.py     ← Public API: run_conclave, load_config, doctor, estimate_cost, scoring, voting, dialogue, bias
 │       ├── config.py       ← .env loading, member discovery, templates
 │       ├── providers.py    ← HTTP retry, Anthropic/Gemini/OpenAI/OpenRouter callers
 │       ├── ranking.py      ← Ranking extraction, aggregation, critique prompts
+│       ├── voting.py       ← Quorum voting (point distribution, aggregation)
+│       ├── dialogue.py     ← Multi-round dialogue (convergence detection)
+│       ├── bias.py         ← Bias tracking & impartiality metrics
 │       ├── sessions.py     ← Multi-turn session store and context building
 │       ├── progress.py     ← Real-time stderr progress reporting
 │       ├── scoring.py      ← EMA-based model scoring, weights, and leaderboard
-│       ├── cost.py         ← Pricing data and cost estimation
-│       ├── orchestrator.py ← Phase 1/2 orchestration, run_conclave, doctor
+│       ├── cost.py         ← Pricing data and cost estimation (supports --vote, --rounds)
+│       ├── orchestrator.py ← Phase 1/2 orchestration, voting, dialogue, run_conclave, doctor
 │       └── cli.py          ← argparse, pretty printing, main()
 ├── tests/
 │   ├── conftest.py         ← sys.path setup for imports
@@ -365,12 +475,16 @@ conclave/
 │   ├── test_providers.py   ← HTTP retry logic, call_model routing, null content (25 tests)
 │   ├── test_scoring.py     ← EMA, record_round, weights, leaderboard, file I/O (~35 tests)
 │   ├── test_sessions.py    ← Context building, token budget truncation (14 tests)
-│   └── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor, two-pass flow (23 tests)
+│   ├── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor, two-pass flow (23 tests)
+│   ├── test_voting.py      ← Vote parsing, aggregation, consensus strength (16 tests)
+│   ├── test_dialogue.py    ← Stance detection, rounds, convergence, max cap (16 tests)
+│   └── test_bias.py        ← Bias data I/O, metrics computation, tracking toggle (14 tests)
 └── README.md
 
 ~/.config/conclave/
 ├── .env                    ← API keys and model config
 ├── scores.json             ← Model scoring data (auto-created)
+├── bias.json               ← Voting bias tracking data (auto-created)
 └── sessions/               ← Multi-turn session files (auto-created)
     └── 20260301-143022-abcd.json
 ```
@@ -391,6 +505,12 @@ A: Yes. Add 5 lines to your `.env` file. With OpenRouter, you get access to 200+
 **Q: Can I have a multi-turn debate?**
 A: Yes. Use `--session new` on the first turn, then `--session last` for follow-ups. Each model sees a summary of all prior turns as context.
 
+**Q: What's the difference between `--vote` and `deep`?**
+A: `deep` uses ordinal ranking (1st, 2nd, 3rd). `--vote` uses point distribution (60/40, 55/45...) which gives finer-grained signal about how much one response is preferred over another.
+
+**Q: Can I combine modes?**
+A: Yes. `--vote --rounds 2` runs voting first, then a dialogue round. `--session` works with all modes.
+
 **Q: What happens if an API call fails?**
 A: The script retries automatically with exponential backoff (configurable). If all retries fail, the member is marked as failed and the council continues without it.
 
@@ -407,7 +527,10 @@ PRs welcome! Ideas:
 - [x] Multi-turn conversation memory (`--session`)
 - [x] Modular package architecture (config, providers, ranking, sessions, cost, orchestrator, cli)
 - [x] Model scoring — EMA-based performance tracking, weights, and leaderboard (`leaderboard` command)
-- [x] Test suite — ranking parser, retry logic, phase orchestration, sessions, scoring (~150 tests, pytest)
+- [x] Quorum voting — point-based voting with consensus strength (`--vote`)
+- [x] Multi-round dialogue — iterative refinement with convergence detection (`--rounds N`)
+- [x] Bias tracking — per-model voting patterns and impartiality metrics (`bias` command)
+- [x] Test suite — ranking, retry, orchestration, sessions, scoring, voting, dialogue, bias (223 tests, pytest)
 - [x] `pyproject.toml` — installable package with `pip install`, CLI entry point, optional deps
 - [x] HTTP connection pooling — shared `httpx.AsyncClient` across all API calls in a session
 - [x] Null content handling — safe extraction when APIs return `content: null` (reasoning models)

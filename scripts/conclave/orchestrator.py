@@ -6,7 +6,9 @@ from typing import Optional
 
 import httpx
 
+from .bias import record_dialogue_run, record_vote_run
 from .config import load_config, load_templates
+from .dialogue import run_dialogue_rounds
 from .progress import _Progress
 from .providers import call_model
 from .ranking import (
@@ -15,6 +17,7 @@ from .ranking import (
 )
 from .scoring import load_scores, record_round, save_scores
 from .sessions import _SessionStore, _build_context_prompt, _record_turn
+from .voting import aggregate_votes, build_vote_prompt, parse_vote_response
 
 
 async def doctor(cfg: dict) -> list[dict]:
@@ -114,12 +117,68 @@ async def phase2(original_prompt: str, drafts: list, members: list,
     return list(await asyncio.gather(*tasks))
 
 
+async def phase2_vote(original_prompt: str, drafts: list, members: list,
+                      cfg: dict, progress: _Progress,
+                      *, client=None) -> list:
+    """Point-based voting instead of ordinal ranking."""
+    anonymize = cfg.get("anonymize_reviews", True)
+    system = "You are a judge in an expert council. Score the responses fairly."
+
+    ok_drafts = [d for d in drafts if "error" not in d]
+    if len(ok_drafts) < 2:
+        return []
+
+    async def _vote_and_report(member, prompt_text, meta_info):
+        valid_letters = set(meta_info["letter_map"].keys())
+        result = await call_model(member, prompt_text, system, cfg, client=client)
+        result.update(meta_info)
+
+        if "error" not in result and "content" in result:
+            votes = parse_vote_response(result["content"], valid_letters)
+            result["votes"] = votes
+        else:
+            result["votes"] = None
+
+        progress.member_done(meta_info, result)
+        return result
+
+    tasks = []
+    for m in members:
+        if any(d["key"] == m["key"] and "error" in d for d in drafts):
+            continue
+        if m.get("local", False):
+            # Local members get a placeholder
+            prompt_text, letter_map = build_vote_prompt(
+                original_prompt, drafts, m["key"], anonymize)
+            meta_info = {"key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                         "letter_map": letter_map, "needs_claude_code": True,
+                         "prompt": prompt_text, "content": "", "elapsed": 0, "votes": None}
+            tasks.append(asyncio.coroutine(lambda mi=meta_info: mi)()
+                         if False else _make_local_vote(meta_info, progress))
+            continue
+        prompt_text, letter_map = build_vote_prompt(
+            original_prompt, drafts, m["key"], anonymize)
+        meta_info = {"key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                     "letter_map": letter_map}
+        tasks.append(_vote_and_report(m, prompt_text, meta_info))
+
+    return list(await asyncio.gather(*tasks))
+
+
+async def _make_local_vote(meta_info, progress):
+    """Return a local placeholder for voting."""
+    progress.member_done(meta_info, meta_info)
+    return meta_info
+
+
 async def run_conclave(prompt: str, depth: str = "standard",
                        system: Optional[str] = None,
                        member_keys: Optional[list[str]] = None,
                        cfg: Optional[dict] = None,
                        quiet: bool = False,
-                       session: Optional[dict] = None) -> dict:
+                       session: Optional[dict] = None,
+                       vote: bool = False,
+                       rounds: Optional[int] = None) -> dict:
     cfg = cfg or load_config()
     templates = load_templates()
     progress = _Progress(quiet=quiet)
@@ -148,24 +207,56 @@ async def run_conclave(prompt: str, depth: str = "standard",
         api_ok_count = sum(1 for d in drafts if "error" not in d and not d.get("needs_claude_code", False))
         fail_count = sum(1 for d in drafts if "error" in d)
 
-        # ── Phase 2 (deep only) ──
+        # ── Phase 2: vote mode OR deep critique ──
         critiques = []
         rankings = {}
+        vote_results = []
+        vote_aggregation = {}
         phase2_pending = False
-        # Need at least 2 members with content (API responses) for cross-critique
-        if depth == "deep" and (api_ok_count + local_count) >= 2:
+
+        if vote and (api_ok_count + local_count) >= 2:
+            # Voting mode
             if local_count > 0:
-                phase2_pending = True  # defer to Pass 2
+                phase2_pending = True
+            else:
+                progress.phase_start(2, "Quorum voting...")
+                vote_results = await phase2_vote(effective_prompt, drafts, members, cfg, progress, client=client)
+                vote_aggregation = aggregate_votes(vote_results)
+        elif depth == "deep" and (api_ok_count + local_count) >= 2:
+            # Standard deep critique
+            if local_count > 0:
+                phase2_pending = True
             else:
                 progress.phase_start(2, "Anonymized cross-critique...")
                 critiques = await phase2(effective_prompt, drafts, members, cfg, templates, progress, client=client)
                 rankings = aggregate_rankings(critiques)
+
+        # ── Multi-round dialogue ──
+        dialogue_data = {}
+        if rounds and rounds > 1 and not phase2_pending and (critiques or vote_results):
+            dialogue_data = await run_dialogue_rounds(
+                effective_prompt, drafts, critiques or vote_results,
+                members, cfg, call_model, rounds, progress, client=client)
 
     # ── Update scoring ──
     _scores = load_scores()
     _scores = record_round(_scores, drafts, rankings,
                            alpha=cfg.get("defaults", {}).get("scoring_ema_alpha", 0.3))
     save_scores(_scores)
+
+    # ── Record bias data ──
+    if vote and vote_aggregation:
+        record_vote_run(
+            prompt, "vote",
+            vote_aggregation.get("per_model_votes", {}),
+            vote_aggregation.get("consensus_strength", 0),
+        )
+    if rounds and rounds > 1 and dialogue_data:
+        record_dialogue_run(
+            prompt, dialogue_data.get("total_rounds", 1),
+            dialogue_data.get("converged_at"),
+            vote_aggregation.get("consensus_strength", 0) if vote_aggregation else 0,
+        )
 
     # ── Save turn to session ──
     session_id = None
@@ -188,6 +279,9 @@ async def run_conclave(prompt: str, depth: str = "standard",
         "phase1_drafts": drafts,
         "phase2_critiques": critiques,
         "aggregate_rankings": rankings,
+        "vote_results": vote_results,
+        "vote_aggregation": vote_aggregation,
+        "dialogue": dialogue_data,
         "member_scores": _scores.get("members", {}),
         "summary": {
             "models_queried": len(drafts),
@@ -195,6 +289,9 @@ async def run_conclave(prompt: str, depth: str = "standard",
             "local": local_count,
             "failed": fail_count,
             "critiques": len([c for c in critiques if "error" not in c]),
+            "vote_count": len([v for v in vote_results if v.get("votes")]),
+            "dialogue_rounds": dialogue_data.get("total_rounds", 0) if dialogue_data else 0,
+            "converged_at": dialogue_data.get("converged_at") if dialogue_data else None,
         },
     }
     return output

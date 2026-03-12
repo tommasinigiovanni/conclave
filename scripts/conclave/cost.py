@@ -33,7 +33,8 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def estimate_cost(prompt: str, depth: str, members: list, cfg: dict) -> dict:
+def estimate_cost(prompt: str, depth: str, members: list, cfg: dict,
+                   rounds: int | None = None, vote: bool = False) -> dict:
     """Estimate cost without making any API calls.
 
     Returns {members: [...], phase1_total, phase2_total, total, note}.
@@ -88,21 +89,43 @@ def estimate_cost(prompt: str, depth: str, members: list, cfg: dict) -> dict:
             p2_total += p2_cost
             row["phase2_est"] = round(p2_cost, 5)
 
-    total = p1_total + p2_total
-    return {
+    # ── Rounds multiplier ──
+    rounds_total = 0.0
+    actual_rounds = rounds if rounds and rounds > 1 else 0
+    if actual_rounds > 1:
+        # Each additional round costs ~same as phase1 per model
+        rounds_total = p1_total * (actual_rounds - 1)
+        for row in rows:
+            if not row["local"]:
+                row["rounds_est"] = round(row["phase1_est"] * (actual_rounds - 1), 5)
+
+    total = p1_total + p2_total + rounds_total
+    result = {
         "members": rows,
         "phase1_total": round(p1_total, 5),
         "phase2_total": round(p2_total, 5),
+        "rounds_total": round(rounds_total, 5),
         "total": round(total, 5),
         "note": "Estimates assume max output tokens; actual cost is usually lower.",
     }
+    if vote:
+        result["vote_note"] = "Vote mode has same cost as deep (Phase 2 = voting calls)."
+    if actual_rounds > 1:
+        result["rounds_note"] = f"{actual_rounds} rounds: Phase 1 + {actual_rounds - 1} additional round(s)."
+    return result
 
 
-def print_estimate(est: dict, depth: str) -> None:
+def print_estimate(est: dict, depth: str, rounds: int | None = None,
+                   vote: bool = False) -> None:
     """Pretty-print cost estimate to stderr."""
     out = sys.stderr
+    mode_parts = [f"depth={depth}"]
+    if vote:
+        mode_parts.append("vote")
+    if rounds and rounds > 1:
+        mode_parts.append(f"rounds={rounds}")
     print(f"\n{'─'*52}", file=out)
-    print(f"  Cost estimate  (depth={depth})", file=out)
+    print(f"  Cost estimate  ({', '.join(mode_parts)})", file=out)
     print(f"{'─'*52}", file=out)
 
     for r in est["members"]:
@@ -117,13 +140,22 @@ def print_estimate(est: dict, depth: str) -> None:
             if "phase2_est" in r:
                 p2 = r["phase2_est"]
                 line += f"  P2 ${p2:.4f}"
+            if "rounds_est" in r:
+                rn = r["rounds_est"]
+                line += f"  Rounds ${rn:.4f}"
             print(line, file=out)
 
     print(f"{'─'*52}", file=out)
     parts = [f"Phase 1 ${est['phase1_total']:.4f}"]
     if est["phase2_total"] > 0:
         parts.append(f"Phase 2 ${est['phase2_total']:.4f}")
+    if est.get("rounds_total", 0) > 0:
+        parts.append(f"Rounds ${est['rounds_total']:.4f}")
     parts.append(f"Total ${est['total']:.4f}")
     print(f"  {' · '.join(parts)}", file=out)
     print(f"  {est['note']}", file=out)
+    if est.get("vote_note"):
+        print(f"  {est['vote_note']}", file=out)
+    if est.get("rounds_note"):
+        print(f"  {est['rounds_note']}", file=out)
     print(f"{'─'*52}\n", file=out)

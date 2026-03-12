@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 
+from .bias import load_bias_data, print_bias_report
 from .config import load_config
 from .cost import estimate_cost, print_estimate
 from .orchestrator import doctor, run_conclave, run_phase2_only
@@ -68,6 +69,49 @@ def print_pretty(result: dict) -> None:
                     print(f"     {line}")
                 print()
 
+    if result.get("vote_results"):
+        print("─── VOTING: Quorum Point Distribution ───\n")
+        for vr in result["vote_results"]:
+            icon = vr.get("icon", "")
+            lbl = vr.get("label", vr.get("key", "?"))
+            if "error" in vr:
+                print(f"  ❌ {icon} {lbl} — {vr['error']}\n")
+            elif vr.get("needs_claude_code"):
+                print(f"  🏠 {icon} {lbl} — awaiting Claude Code\n")
+            else:
+                votes = vr.get("votes")
+                if votes:
+                    letter_map = vr.get("letter_map", {})
+                    vote_str = ", ".join(f"{letter_map.get(l, l)}: {p}pts"
+                                        for l, p in sorted(votes.items()))
+                    print(f"  🗳️  {icon} {lbl} → {vote_str}")
+                else:
+                    print(f"  ⚠️  {icon} {lbl} — vote parse failed")
+            print()
+        va = result.get("vote_aggregation", {})
+        if va.get("weighted_scores"):
+            print("  Weighted Scores:")
+            for model, score in va["weighted_scores"].items():
+                print(f"    {model}: {score} pts")
+            print(f"  Consensus Strength: {va.get('consensus_strength', 0):.1%}\n")
+
+    if result.get("dialogue", {}).get("rounds"):
+        dia = result["dialogue"]
+        print(f"─── DIALOGUE: {dia.get('total_rounds', 0)} rounds ───\n")
+        if dia.get("converged_at"):
+            print(f"  Converged at round {dia['converged_at']}\n")
+        for rd in dia["rounds"]:
+            print(f"  Round {rd['round']}:")
+            for r in rd["responses"]:
+                icon = r.get("icon", "")
+                lbl = r.get("label", r.get("key", "?"))
+                stance = r.get("stance", "?")
+                if "error" in r:
+                    print(f"    ❌ {icon} {lbl} — {r['error']}")
+                else:
+                    print(f"    {icon} {lbl} [{stance}]")
+            print()
+
     print(f"{'═'*64}")
     print("  ⬆️  Full data in JSON — Claude Code synthesizes from here")
     print(f"{'═'*64}\n")
@@ -103,6 +147,11 @@ def main():
 
     if len(sys.argv) >= 2 and sys.argv[1] == "leaderboard":
         print_leaderboard(load_scores())
+        sys.exit(0)
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "bias":
+        data = load_bias_data()
+        print_bias_report(data)
         sys.exit(0)
 
     if len(sys.argv) >= 2 and sys.argv[1] == "sessions":
@@ -148,6 +197,10 @@ Examples:
   conclave.py --session new "What is CAP?"
   conclave.py --session last "Now explain PACELC"
   conclave.py --session 20260301-143022 "And Raft consensus?"
+  conclave.py "Compare approaches" --vote
+  conclave.py "Debate this" --rounds 3
+  conclave.py "Debate this" --rounds 2 --vote
+  conclave.py bias
   conclave.py phase2 /path/to/phase1.json --raw
   conclave.py sessions
   conclave.py leaderboard
@@ -164,22 +217,32 @@ Examples:
                         help="Estimate cost and exit without calling APIs")
     parser.add_argument("--session", default=None, metavar="ID",
                         help="Multi-turn session: 'new', 'last', or a session ID")
+    parser.add_argument("--vote", action="store_true",
+                        help="Use quorum voting (point distribution) instead of ordinal ranking")
+    parser.add_argument("--rounds", type=int, default=None, metavar="N",
+                        help="Number of dialogue rounds (default: 1, no dialogue)")
 
     args = parser.parse_args()
     cfg = load_config()
 
     member_keys = [m.strip() for m in args.members.split(",")] if args.members else None
 
+    # ── Resolve effective depth for estimation ──
+    effective_depth = args.depth
+    if args.vote:
+        effective_depth = "deep"  # vote mode has same cost profile as deep
+
     # ── Estimate mode: print cost and exit ──
     if args.estimate:
         members = cfg.get("council_members", [])
         if member_keys:
             members = [m for m in members if m["key"] in member_keys]
-        est = estimate_cost(args.prompt, args.depth, members, cfg)
+        est = estimate_cost(args.prompt, effective_depth, members, cfg,
+                            rounds=args.rounds, vote=args.vote)
         if args.raw:
             print(json.dumps(est, indent=2, ensure_ascii=False))
         else:
-            print_estimate(est, args.depth)
+            print_estimate(est, effective_depth, rounds=args.rounds, vote=args.vote)
         sys.exit(0)
 
     # ── Resolve session ──
@@ -196,6 +259,8 @@ Examples:
         cfg=cfg,
         quiet=args.quiet,
         session=session,
+        vote=args.vote,
+        rounds=args.rounds,
     ))
 
     if args.raw:

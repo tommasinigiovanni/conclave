@@ -25,6 +25,18 @@ SKILL_DIR="$(dirname "$(realpath "$0")")"  # or use the skill's known path
 #   "deep" / "debate" / "critical" → --depth deep
 
 python3 "${SKILL_DIR}/scripts/conclave.py" "<USER_PROMPT>" --depth <LEVEL> --raw
+
+# Voting mode (point-based instead of ordinal ranking):
+python3 "${SKILL_DIR}/scripts/conclave.py" "<USER_PROMPT>" --vote --raw
+
+# Multi-round dialogue:
+python3 "${SKILL_DIR}/scripts/conclave.py" "<USER_PROMPT>" --rounds 3 --raw
+
+# Combined voting + dialogue:
+python3 "${SKILL_DIR}/scripts/conclave.py" "<USER_PROMPT>" --vote --rounds 2 --raw
+
+# Bias report:
+python3 "${SKILL_DIR}/scripts/conclave.py" bias
 ```
 
 The `--raw` flag outputs JSON. **Always use `--raw`.**
@@ -130,6 +142,43 @@ Use only the single response letters, best first.
 [The best unified answer, informed by the full debate]
 ```
 
+**Vote mode:** Synthesize Phase 1 drafts + voting results:
+```
+## 🗳️ Conclave Quorum Vote
+
+### Weighted Scores
+[Points each model received from peers]
+
+### Consensus Strength
+[How strongly models agreed on the winner (0-100%)]
+
+### Key Insights
+[What the top-scored model got right]
+
+### Disagreements
+[Where voters diverged]
+
+### Final Answer
+[The best answer, informed by the quorum vote]
+```
+
+**Dialogue mode:** Synthesize across rounds:
+```
+## 💬 Conclave Dialogue (N rounds)
+
+### Evolution
+[How positions changed across rounds]
+
+### Convergence
+[Points where models converged, and in which round]
+
+### Remaining Disagreements
+[Issues that persisted through all rounds]
+
+### Final Answer
+[The best answer after multi-round refinement]
+```
+
 ## Depth Levels
 
 | Trigger | Depth | Phases | Best for |
@@ -137,6 +186,98 @@ Use only the single response letters, best first.
 | `/conclave quick ...` | quick | 1 | Factual questions, sanity checks |
 | `/conclave ...` | standard | 1 + 3 | Analysis, code review, recommendations |
 | `/conclave deep ...` | deep | 1 + 2 + 3 | Architecture, security, critical decisions |
+| `/conclave vote ...` | vote | 1 + vote | Comparative evaluation, ranking alternatives |
+| `/conclave ... --rounds N` | any + dialogue | 1 + 2 + dialogue | Iterative refinement, consensus building |
+
+## CLI Commands
+
+```bash
+# Core modes
+conclave.py "<prompt>" --depth quick|standard|deep  # Standard depth levels
+conclave.py "<prompt>" --vote                        # Quorum voting mode
+conclave.py "<prompt>" --rounds N                    # Multi-round dialogue
+conclave.py "<prompt>" --vote --rounds N             # Combined vote + dialogue
+
+# Utilities
+conclave.py doctor                   # Health check all models
+conclave.py leaderboard              # EMA-based model scores
+conclave.py sessions                 # List saved sessions
+conclave.py bias                     # Bias & impartiality report
+conclave.py phase2 <file> --raw      # Run Phase 2 from saved Phase 1
+
+# Options
+--raw           JSON output only
+--quiet / -q    Suppress stderr progress
+--estimate      Cost estimate (supports --vote, --rounds)
+--members k1,k2 Filter council members
+--session ID    Multi-turn session (new/last/<id>)
+--system "..."  System prompt for all models
+```
+
+## Environment Variables (.env)
+
+```bash
+# Provider keys
+ANTHROPIC_API_KEY=...
+GOOGLE_GEMINI_API_KEY=...
+OPENAI_API_KEY=...
+XAI_API_KEY=...
+OPENROUTER_API_KEY=...
+
+# Model configuration (per member)
+CONCLAVE_MEMBER_<KEY>_MODEL=...
+CONCLAVE_MEMBER_<KEY>_PROVIDER=...
+CONCLAVE_MEMBER_<KEY>_LABEL=...
+CONCLAVE_MEMBER_<KEY>_ICON=...
+CONCLAVE_MEMBER_<KEY>_LOCAL=true|false
+CONCLAVE_MEMBER_<KEY>_FALLBACK_MODEL=...
+
+# Defaults
+CONCLAVE_TEMPERATURE=0.7
+CONCLAVE_MAX_TOKENS=2048
+CONCLAVE_TIMEOUT=120
+CONCLAVE_MAX_RETRIES=3
+CONCLAVE_PROVIDER_MODE=direct|openrouter
+CONCLAVE_ANONYMIZE=true
+CONCLAVE_SCORING_EMA_ALPHA=0.3
+CONCLAVE_SESSION_TOKEN_BUDGET=20000
+
+# Dialogue settings
+CONCLAVE_MAX_ROUNDS=3              # Hard cap for --rounds
+CONCLAVE_CONVERGENCE_THRESHOLD=0.85 # Early termination threshold
+
+# Bias tracking
+CONCLAVE_BIAS_TRACKING=true|false  # Enable/disable bias data collection
+```
+
+## Project Structure
+
+```
+scripts/conclave/
+├── __init__.py          # Public API exports
+├── cli.py               # CLI entry point (argparse, pretty printing)
+├── config.py            # .env loading, member discovery
+├── cost.py              # Cost estimation (supports vote/rounds)
+├── orchestrator.py      # Main run_conclave, phases, voting, dialogue integration
+├── providers.py         # HTTP callers (Anthropic, Google, OpenAI, xAI, OpenRouter)
+├── progress.py          # Real-time stderr progress
+├── ranking.py           # Ranking extraction (JSON + regex), aggregation
+├── scoring.py           # EMA-based model scoring, leaderboard
+├── sessions.py          # Multi-turn session persistence
+├── voting.py            # Quorum voting (point distribution, aggregation)
+├── dialogue.py          # Multi-round dialogue (convergence detection)
+└── bias.py              # Bias tracking & impartiality metrics
+tests/
+├── conftest.py
+├── test_orchestrator.py
+├── test_providers.py
+├── test_ranking.py
+├── test_scoring.py
+├── test_sessions.py
+├── test_voting.py
+├── test_dialogue.py
+└── test_bias.py
+```
 
 ## Troubleshooting
 
