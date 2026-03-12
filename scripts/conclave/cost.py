@@ -34,7 +34,8 @@ def _estimate_tokens(text: str) -> int:
 
 
 def estimate_cost(prompt: str, depth: str, members: list, cfg: dict,
-                   rounds: int | None = None, vote: bool = False) -> dict:
+                   rounds: int | None = None, vote: bool = False,
+                   fallacies: bool = False) -> dict:
     """Estimate cost without making any API calls.
 
     Returns {members: [...], phase1_total, phase2_total, total, note}.
@@ -99,12 +100,34 @@ def estimate_cost(prompt: str, depth: str, members: list, cfg: dict,
             if not row["local"]:
                 row["rounds_est"] = round(row["phase1_est"] * (actual_rounds - 1), 5)
 
-    total = p1_total + p2_total + rounds_total
+    # ── Fallacy detection cost ──
+    fallacy_total = 0.0
+    use_fallacies = fallacies or cfg.get("fallacy_detection", False)
+    if use_fallacies:
+        # Each remote member's response is analyzed.
+        # If a local member exists, analysis is free (local analyzer).
+        has_local = any(m.get("local", False) for m in members)
+        if not has_local and remote:
+            # Use first remote member as analyzer — ~500 input + ~200 output tokens each
+            analyzer_model = remote[0].get("direct_model", "")
+            a_inp_rate, a_out_rate = _PRICING.get(analyzer_model, _DEFAULT_PRICING)
+            for r in rows:
+                if not r["local"]:
+                    f_cost = 500 * a_inp_rate / 1_000_000 + 200 * a_out_rate / 1_000_000
+                    fallacy_total += f_cost
+                    r["fallacy_est"] = round(f_cost, 5)
+        else:
+            # Local analyzer = free
+            for r in rows:
+                r["fallacy_est"] = 0.0
+
+    total = p1_total + p2_total + rounds_total + fallacy_total
     result = {
         "members": rows,
         "phase1_total": round(p1_total, 5),
         "phase2_total": round(p2_total, 5),
         "rounds_total": round(rounds_total, 5),
+        "fallacy_total": round(fallacy_total, 5),
         "total": round(total, 5),
         "note": "Estimates assume max output tokens; actual cost is usually lower.",
     }
@@ -112,11 +135,13 @@ def estimate_cost(prompt: str, depth: str, members: list, cfg: dict,
         result["vote_note"] = "Vote mode has same cost as deep (Phase 2 = voting calls)."
     if actual_rounds > 1:
         result["rounds_note"] = f"{actual_rounds} rounds: Phase 1 + {actual_rounds - 1} additional round(s)."
+    if use_fallacies:
+        result["fallacy_note"] = "Fallacy detection: 1 analysis call per remote member (free if local analyzer available)."
     return result
 
 
 def print_estimate(est: dict, depth: str, rounds: int | None = None,
-                   vote: bool = False) -> None:
+                   vote: bool = False, fallacies: bool = False) -> None:
     """Pretty-print cost estimate to stderr."""
     out = sys.stderr
     mode_parts = [f"depth={depth}"]
@@ -124,6 +149,8 @@ def print_estimate(est: dict, depth: str, rounds: int | None = None,
         mode_parts.append("vote")
     if rounds and rounds > 1:
         mode_parts.append(f"rounds={rounds}")
+    if fallacies or est.get("fallacy_total", 0) > 0:
+        mode_parts.append("fallacies")
     print(f"\n{'─'*52}", file=out)
     print(f"  Cost estimate  ({', '.join(mode_parts)})", file=out)
     print(f"{'─'*52}", file=out)
@@ -143,6 +170,9 @@ def print_estimate(est: dict, depth: str, rounds: int | None = None,
             if "rounds_est" in r:
                 rn = r["rounds_est"]
                 line += f"  Rounds ${rn:.4f}"
+            if "fallacy_est" in r and r["fallacy_est"] > 0:
+                fe = r["fallacy_est"]
+                line += f"  Fallacy ${fe:.4f}"
             print(line, file=out)
 
     print(f"{'─'*52}", file=out)
@@ -151,6 +181,8 @@ def print_estimate(est: dict, depth: str, rounds: int | None = None,
         parts.append(f"Phase 2 ${est['phase2_total']:.4f}")
     if est.get("rounds_total", 0) > 0:
         parts.append(f"Rounds ${est['rounds_total']:.4f}")
+    if est.get("fallacy_total", 0) > 0:
+        parts.append(f"Fallacy ${est['fallacy_total']:.4f}")
     parts.append(f"Total ${est['total']:.4f}")
     print(f"  {' · '.join(parts)}", file=out)
     print(f"  {est['note']}", file=out)
@@ -158,4 +190,6 @@ def print_estimate(est: dict, depth: str, rounds: int | None = None,
         print(f"  {est['vote_note']}", file=out)
     if est.get("rounds_note"):
         print(f"  {est['rounds_note']}", file=out)
+    if est.get("fallacy_note"):
+        print(f"  {est['fallacy_note']}", file=out)
     print(f"{'─'*52}\n", file=out)

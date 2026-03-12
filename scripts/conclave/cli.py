@@ -50,6 +50,28 @@ def print_pretty(result: dict) -> None:
                 print(f"     {line}")
             print()
 
+    if result.get("fallacies") and any(result["fallacies"].values()):
+        _SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+        _SEVERITY_LABEL = {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
+        print("─── LOGICAL ANALYSIS ───\n")
+        for dr in result["phase1_drafts"]:
+            key = dr.get("key", "")
+            icon = dr.get("icon", "")
+            lbl = dr.get("label", key)
+            items = result["fallacies"].get(key, [])
+            if not items:
+                print(f"  {icon} {lbl} — no fallacies detected\n")
+                continue
+            print(f"  {icon} {lbl} — {len(items)} fallac{'y' if len(items) == 1 else 'ies'} detected")
+            items_sorted = sorted(items, key=lambda x: _SEVERITY_ORDER.get(x.get("severity", "low"), 3))
+            for it in items_sorted:
+                sev = _SEVERITY_LABEL.get(it["severity"], it["severity"].upper())
+                ftype = it["type"].replace("_", " ").title()
+                print(f"    [{sev}] {ftype}")
+                print(f"      Quote: \"{it['quote']}\"")
+                print(f"      -> {it['explanation']}")
+            print()
+
     if result["phase2_critiques"]:
         print("─── PHASE 2: Anonymized Cross-Critique ───\n")
         for cr in result["phase2_critiques"]:
@@ -221,6 +243,8 @@ Examples:
                         help="Use quorum voting (point distribution) instead of ordinal ranking")
     parser.add_argument("--rounds", type=int, default=None, metavar="N",
                         help="Number of dialogue rounds (default: 1, no dialogue)")
+    parser.add_argument("--fallacies", "-f", action="store_true",
+                        help="Enable fallacy detection (analyzes responses for logical fallacies)")
 
     args = parser.parse_args()
     cfg = load_config()
@@ -238,11 +262,13 @@ Examples:
         if member_keys:
             members = [m for m in members if m["key"] in member_keys]
         est = estimate_cost(args.prompt, effective_depth, members, cfg,
-                            rounds=args.rounds, vote=args.vote)
+                            rounds=args.rounds, vote=args.vote,
+                            fallacies=args.fallacies)
         if args.raw:
             print(json.dumps(est, indent=2, ensure_ascii=False))
         else:
-            print_estimate(est, effective_depth, rounds=args.rounds, vote=args.vote)
+            print_estimate(est, effective_depth, rounds=args.rounds, vote=args.vote,
+                          fallacies=args.fallacies)
         sys.exit(0)
 
     # ── Resolve session ──
@@ -250,6 +276,10 @@ Examples:
     if args.session:
         store = _SessionStore()
         session = store.resolve(args.session)
+
+    # ── CLI flag overrides ──
+    if args.fallacies:
+        cfg["fallacy_detection"] = True
 
     result = asyncio.run(run_conclave(
         prompt=args.prompt,

@@ -9,6 +9,7 @@ import httpx
 from .bias import record_dialogue_run, record_vote_run
 from .config import load_config, load_templates
 from .dialogue import run_dialogue_rounds
+from .fallacies import detect_all_fallacies
 from .progress import _Progress
 from .providers import call_model, stream_model
 from .ranking import (
@@ -328,6 +329,15 @@ async def run_conclave(prompt: str, depth: str = "standard",
         api_ok_count = sum(1 for d in drafts if "error" not in d and not d.get("needs_claude_code", False))
         fail_count = sum(1 for d in drafts if "error" in d)
 
+        # ── Fallacy detection (optional) ──
+        fallacy_results = {}
+        if cfg.get("fallacy_detection", False):
+            try:
+                fallacy_results = await detect_all_fallacies(
+                    drafts, cfg, client=client)
+            except Exception:
+                fallacy_results = {}
+
         # ── Phase 2: vote mode OR deep critique ──
         critiques = []
         rankings = {}
@@ -400,6 +410,7 @@ async def run_conclave(prompt: str, depth: str = "standard",
         "phase1_drafts": drafts,
         "phase2_critiques": critiques,
         "aggregate_rankings": rankings,
+        "fallacies": fallacy_results,
         "vote_results": vote_results,
         "vote_aggregation": vote_aggregation,
         "dialogue": dialogue_data,

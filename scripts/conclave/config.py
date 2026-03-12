@@ -127,6 +127,7 @@ def load_config() -> dict:
         "anonymize_reviews": _env("CONCLAVE_ANONYMIZE", env_file, "true").lower() == "true",
         "stream": _env("CONCLAVE_STREAM", env_file, "true").lower() == "true",
         "stream_sequential": _env("CONCLAVE_STREAM_SEQUENTIAL", env_file, "false").lower() == "true",
+        "fallacy_detection": _env("CONCLAVE_FALLACY_DETECTION", env_file, "false").lower() == "true",
     }
 
 

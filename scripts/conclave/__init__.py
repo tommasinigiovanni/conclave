@@ -2,6 +2,7 @@
 
 from .bias import compute_metrics, load_bias_data, print_bias_report, record_vote_run
 from .config import load_config
+from .fallacies import FALLACIES, detect_all_fallacies, detect_fallacies
 from .cost import estimate_cost
 from .dialogue import run_dialogue_rounds
 from .orchestrator import doctor, run_conclave, run_phase2_only
@@ -20,4 +21,6 @@ __all__ = [
     "load_bias_data", "compute_metrics", "print_bias_report", "record_vote_run",
     # Streaming
     "stream_model",
+    # Fallacies
+    "FALLACIES", "detect_fallacies", "detect_all_fallacies",
 ]

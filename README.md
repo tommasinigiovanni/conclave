@@ -74,6 +74,7 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 | **Aggregate ranking** | ✅ | ✅ | ❌ |
 | **Quorum voting** | ✅ `--vote` (100-point distribution) | ❌ | ❌ |
 | **Multi-round dialogue** | ✅ `--rounds N` (convergence detection) | ❌ | ❌ |
+| **Fallacy detection** | ✅ `--fallacies` (12 logical fallacies) | ❌ | ❌ |
 | **Bias tracking** | ✅ `bias` command | ❌ | ❌ |
 | **Scoring & leaderboard** | ✅ EMA-based | ❌ | ❌ |
 | **Multi-turn sessions** | ✅ `--session` | ❌ | ❌ |
@@ -153,6 +154,9 @@ OPENROUTER_API_KEY=sk-or-...         # https://openrouter.ai/keys
 
 # Combined voting + dialogue:
 /conclave vote --rounds 2 Compare Kafka vs RabbitMQ for our workload
+
+# Fallacy detection — spot logical errors in model responses:
+/conclave --fallacies deep Is NoSQL always better for scalability?
 ```
 
 ### 4. Health check
@@ -292,6 +296,36 @@ Data is stored in `~/.config/conclave/bias.json` and updated automatically after
 CONCLAVE_BIAS_TRACKING=false
 ```
 
+## Fallacy Detection
+
+An optional layer that analyzes each model's response for **logical fallacies** before Phase 2. This is a unique differentiator — no other multi-LLM framework does this.
+
+```bash
+# Enable via CLI flag:
+/conclave --fallacies deep Is NoSQL always better for scalability?
+
+# Or enable permanently in .env:
+CONCLAVE_FALLACY_DETECTION=true
+```
+
+When enabled, after Phase 1 an analyzer model scans each response for 12 types of logical fallacies (ad hominem, straw man, false dichotomy, appeal to authority, slippery slope, circular reasoning, hasty generalization, appeal to emotion, false equivalence, post hoc, bandwagon, appeal to ignorance).
+
+```
+─── LOGICAL ANALYSIS ───
+
+  🔵 Gemini — 1 fallacy detected
+    [MEDIUM] False Dichotomy
+      Quote: "either we use PostgreSQL or we accept chaos"
+      -> Ignores many valid alternatives like MySQL, SQLite, etc.
+
+  🟢 GPT — no fallacies detected
+  🟣 Claude — no fallacies detected
+```
+
+If a **local member** (Claude Code) is available, it's used as the analyzer — **zero extra API cost**. Otherwise, the first available model is used (~500 input + ~200 output tokens per member).
+
+Default: **off** (`CONCLAVE_FALLACY_DETECTION=false`). Enable with `--fallacies` / `-f` or set the env var to `true`.
+
 ## Configuration
 
 Everything is in **`.env`** — no code changes needed:
@@ -427,7 +461,7 @@ Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thunde
 
 ## Testing
 
-244 tests with zero API calls (all external calls mocked):
+268 tests with zero API calls (all external calls mocked):
 
 ```bash
 pip install -e ".[dev]"    # one-time setup (installs pytest + httpx)
@@ -445,6 +479,7 @@ python3 -m pytest tests/ -v
 | `test_dialogue.py` | 16 | `detect_stance` (converge/maintain/update/unknown), `build_round_prompt`, `check_convergence`, `extract_critiques_for_model`, `run_dialogue_rounds` (correct rounds, early termination, mid-round failure, max cap, vote combo), `get_max_rounds` |
 | `test_bias.py` | 14 | `load_bias_data` (missing/valid/corrupt), `save_bias_data`, `record_vote_run` (append, tracking disabled), `is_tracking_enabled`, `compute_metrics` (empty, single run, most contested, multi-mode, per-model stats) |
 | `test_streaming.py` | 21 | SSE line parsing, Anthropic/OpenAI/Gemini stream parsing, `stream_model` routing, progress streaming display, orchestrator integration (stream=false fallback, sequential, parallel, local members) |
+| `test_fallacies.py` | 24 | JSON parsing (1/2/0 fallacies, fenced, bare), type/severity filtering, graceful degradation (malformed JSON, API error, empty content), quote truncation, parallel detection, analyzer selection, orchestrator integration (enabled/disabled), CLI flag override, cost estimation |
 
 ## CLI Reference
 
@@ -460,6 +495,7 @@ Options:
   --depth {quick,standard,deep}     Depth level (default: standard)
   --vote                            Quorum voting (100-point distribution)
   --rounds N                        Multi-round dialogue (2-3 rounds typical)
+  --fallacies, -f                   Detect logical fallacies in responses
   --members claude,gemini           Comma-separated member keys
   --system "..."                    System prompt for all models
   --raw                             JSON-only output on stdout
@@ -487,6 +523,7 @@ conclave/
 │       ├── ranking.py      ← Ranking extraction, aggregation, critique prompts
 │       ├── voting.py       ← Quorum voting (point distribution, aggregation)
 │       ├── dialogue.py     ← Multi-round dialogue (convergence detection)
+│       ├── fallacies.py    ← Logical fallacy detection (12 types, JSON parsing)
 │       ├── bias.py         ← Bias tracking & impartiality metrics
 │       ├── sessions.py     ← Multi-turn session store and context building
 │       ├── progress.py     ← Real-time stderr progress reporting + streaming display
@@ -504,7 +541,8 @@ conclave/
 │   ├── test_voting.py      ← Vote parsing, aggregation, consensus strength (16 tests)
 │   ├── test_dialogue.py    ← Stance detection, rounds, convergence, max cap (16 tests)
 │   ├── test_bias.py        ← Bias data I/O, metrics computation, tracking toggle (14 tests)
-│   └── test_streaming.py   ← SSE parsing, stream routing, progress display, orchestrator integration (21 tests)
+│   ├── test_streaming.py   ← SSE parsing, stream routing, progress display, orchestrator integration (21 tests)
+│   └── test_fallacies.py   ← Fallacy parsing, filtering, graceful degradation, integration (24 tests)
 └── README.md
 
 ~/.config/conclave/
@@ -557,7 +595,8 @@ PRs welcome! Ideas:
 - [x] Multi-round dialogue — iterative refinement with convergence detection (`--rounds N`)
 - [x] Bias tracking — per-model voting patterns and impartiality metrics (`bias` command)
 - [x] Real-time streaming — SSE token streaming for all providers, parallel + sequential modes
-- [x] Test suite — ranking, retry, orchestration, sessions, scoring, voting, dialogue, bias, streaming (244 tests, pytest)
+- [x] Fallacy detection — logical fallacy analysis with 12 types, free with local analyzer (`--fallacies`)
+- [x] Test suite — ranking, retry, orchestration, sessions, scoring, voting, dialogue, bias, streaming, fallacies (268 tests, pytest)
 - [x] `pyproject.toml` — installable package with `pip install`, CLI entry point, optional deps
 - [x] HTTP connection pooling — shared `httpx.AsyncClient` across all API calls in a session
 - [x] Null content handling — safe extraction when APIs return `content: null` (reasoning models)
