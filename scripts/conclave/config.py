@@ -125,6 +125,8 @@ def load_config() -> dict:
             "scoring_ema_alpha": float(_env("CONCLAVE_SCORING_EMA_ALPHA", env_file, "0.3")),
         },
         "anonymize_reviews": _env("CONCLAVE_ANONYMIZE", env_file, "true").lower() == "true",
+        "stream": _env("CONCLAVE_STREAM", env_file, "true").lower() == "true",
+        "stream_sequential": _env("CONCLAVE_STREAM_SEQUENTIAL", env_file, "false").lower() == "true",
     }
 
 

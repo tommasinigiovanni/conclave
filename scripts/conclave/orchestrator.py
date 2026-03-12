@@ -10,7 +10,7 @@ from .bias import record_dialogue_run, record_vote_run
 from .config import load_config, load_templates
 from .dialogue import run_dialogue_rounds
 from .progress import _Progress
-from .providers import call_model
+from .providers import call_model, stream_model
 from .ranking import (
     aggregate_rankings, build_critique_prompt, build_repair_prompt,
     parse_ranking, parse_ranking_json,
@@ -49,6 +49,21 @@ async def doctor(cfg: dict) -> list[dict]:
 
 async def phase1(prompt: str, system: Optional[str], members: list, cfg: dict,
                   progress: _Progress, *, client=None) -> list:
+    use_stream = cfg.get("stream", True)
+    sequential = cfg.get("stream_sequential", False)
+
+    if not use_stream:
+        return await _phase1_standard(prompt, system, members, cfg, progress, client=client)
+
+    if sequential:
+        return await _phase1_stream_sequential(prompt, system, members, cfg, progress, client=client)
+
+    return await _phase1_stream_parallel(prompt, system, members, cfg, progress, client=client)
+
+
+async def _phase1_standard(prompt: str, system: Optional[str], members: list,
+                            cfg: dict, progress: _Progress, *, client=None) -> list:
+    """Original non-streaming Phase 1."""
     async def _call_and_report(m):
         result = await call_model(m, prompt, system, cfg, client=client)
         result["key"] = m["key"]
@@ -58,6 +73,112 @@ async def phase1(prompt: str, system: Optional[str], members: list, cfg: dict,
         return result
 
     return list(await asyncio.gather(*[_call_and_report(m) for m in members]))
+
+
+async def _phase1_stream_sequential(prompt: str, system: Optional[str],
+                                     members: list, cfg: dict,
+                                     progress: _Progress, *, client=None) -> list:
+    """Stream one model at a time — tokens displayed live on stderr."""
+    import time as _time
+    results = []
+    for m in members:
+        if m.get("local", False):
+            result = await call_model(m, prompt, system, cfg, client=client)
+            result["key"] = m["key"]
+            result["label"] = m["label"]
+            result["icon"] = m.get("icon", "")
+            progress.member_done(m, result)
+            results.append(result)
+            continue
+
+        start = _time.time()
+        try:
+            gen = stream_model(m, prompt, system, cfg, client=client)
+            text = await progress.stream_member_response(
+                m["label"], m.get("icon", "⚪"), gen)
+            elapsed = round(_time.time() - start, 2)
+            result = {
+                "key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                "content": text, "tokens": None,
+                "model": m.get("direct_model", ""), "elapsed": elapsed,
+                "streamed": True,
+            }
+        except Exception as e:
+            elapsed = round(_time.time() - start, 2)
+            result = {
+                "key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                "error": str(e), "elapsed": elapsed,
+            }
+            progress.member_done(m, result)
+        results.append(result)
+    return results
+
+
+async def _phase1_stream_parallel(prompt: str, system: Optional[str],
+                                   members: list, cfg: dict,
+                                   progress: _Progress, *, client=None) -> list:
+    """Stream all models in parallel, buffer tokens, display in completion order."""
+    import time as _time
+
+    completion_queue: asyncio.Queue = asyncio.Queue()
+
+    async def _stream_one(m):
+        if m.get("local", False):
+            result = await call_model(m, prompt, system, cfg, client=client)
+            result["key"] = m["key"]
+            result["label"] = m["label"]
+            result["icon"] = m.get("icon", "")
+            await completion_queue.put(result)
+            return result
+
+        start = _time.time()
+        buf: list[str] = []
+        try:
+            async for token in stream_model(m, prompt, system, cfg, client=client):
+                buf.append(token)
+            elapsed = round(_time.time() - start, 2)
+            text = "".join(buf)
+            result = {
+                "key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                "content": text, "tokens": None,
+                "model": m.get("direct_model", ""), "elapsed": elapsed,
+                "streamed": True,
+            }
+        except Exception as e:
+            elapsed = round(_time.time() - start, 2)
+            text = "".join(buf)
+            if text:
+                result = {
+                    "key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                    "content": text, "tokens": None,
+                    "model": m.get("direct_model", ""), "elapsed": elapsed,
+                    "streamed": True, "stream_error": str(e),
+                }
+            else:
+                result = {
+                    "key": m["key"], "label": m["label"], "icon": m.get("icon", ""),
+                    "error": str(e), "elapsed": elapsed,
+                }
+        await completion_queue.put(result)
+        return result
+
+    # Launch all streams in parallel
+    tasks = [asyncio.create_task(_stream_one(m)) for m in members]
+
+    # Display results as they complete
+    for _ in range(len(members)):
+        result = await completion_queue.get()
+        if "error" in result:
+            progress.member_done(result, result)
+        elif result.get("needs_claude_code"):
+            progress.member_done(result, result)
+        else:
+            progress.stream_member_buffered(
+                result["label"], result.get("icon", "⚪"),
+                result.get("content", ""), result.get("elapsed", 0))
+
+    # Collect all results in original member order
+    return [await t for t in tasks]
 
 
 async def phase2(original_prompt: str, drafts: list, members: list,

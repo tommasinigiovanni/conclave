@@ -41,6 +41,7 @@ def cfg():
         },
         "anonymize_reviews": True,
         "council_members": [],
+        "stream": False,
     }
 
 
@@ -246,6 +247,7 @@ class TestRunConclave:
             },
             "anonymize_reviews": True,
             "council_members": members,
+            "stream": False,
         }
 
     def _fake_call(self, member, prompt, system, cfg, **kwargs):
@@ -344,6 +346,7 @@ class TestDoctor:
             "defaults": {"temperature": 0.7, "max_tokens": 50,
                          "timeout_seconds": 5, "max_retries": 0, "retry_base_delay": 0.01},
             "council_members": members,
+            "stream": False,
         }
 
         async def fake_call(member, prompt, system, cfg, **kwargs):
@@ -373,6 +376,7 @@ class TestDoctor:
             "defaults": {"temperature": 0.7, "max_tokens": 50,
                          "timeout_seconds": 5, "max_retries": 0, "retry_base_delay": 0.01},
             "council_members": members,
+            "stream": False,
         }
 
         async def fake_call(member, prompt, system, cfg, **kwargs):
@@ -402,6 +406,7 @@ class TestTwoPassFlow:
             },
             "anonymize_reviews": True,
             "council_members": members,
+            "stream": False,
         }
 
     def _fake_call(self, member, prompt, system, cfg, **kwargs):
@@ -500,6 +505,7 @@ class TestRunPhase2Only:
                 {"key": "gpt", "label": "GPT", "icon": "🟢",
                  "provider": "openai", "local": False, "direct_model": "gpt-5.2"},
             ],
+            "stream": False,
         }
 
     def test_runs_phase2_with_completed_drafts(self):

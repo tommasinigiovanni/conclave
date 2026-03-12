@@ -78,6 +78,7 @@ You: /conclave deep Should I use PostgreSQL or MongoDB for my multi-tenant SaaS?
 | **Scoring & leaderboard** | ✅ EMA-based | ❌ | ❌ |
 | **Multi-turn sessions** | ✅ `--session` | ❌ | ❌ |
 | **Cost estimation** | ✅ `--estimate` | ❌ | ❌ |
+| **Real-time streaming** | ✅ SSE token streaming (parallel + sequential) | ❌ | ❌ |
 | **Real-time progress** | ✅ stderr progress | ❌ | ❌ |
 | **Retry + backoff** | ✅ Exponential | ❌ | ❌ |
 | **`.env` config** | ✅ Swap models in 1 line | Python edit | ✅ |
@@ -348,20 +349,43 @@ python3 scripts/conclave.py "Compare approaches" --vote --estimate
 python3 scripts/conclave.py "Deep debate" --rounds 3 --estimate
 ```
 
-## Real-Time Progress
+## Real-Time Streaming
 
-During execution the council reports progress to **stderr** as each model completes, so you see activity immediately instead of waiting in silence:
+Phase 1 responses are **streamed in real time** via SSE (Server-Sent Events) — you see tokens as they arrive from each provider instead of waiting for the full response.
 
+Two modes are available:
+
+**Parallel mode** (default) — all models stream simultaneously, results displayed as each finishes:
 ```
 🏛️ Conclave — standard · 3 members
-  Phase 1 — Independent drafts...
+  Phase 1 — Independent drafts (streaming)...
     🏠 🟣 Claude — local (Claude Code)
-    ✅ 🔵 Gemini — 3.2s
-    ✅ 🟢 GPT — 4.1s
+    ✅ 🔵 Gemini — 3.2s — "PostgreSQL is better because of ACID tr..."
+    ✅ 🟢 GPT — 4.1s — "Consider a hybrid approach with PostgreS..."
   Done in 4.2s
 ```
 
-JSON output on stdout remains clean. Suppress with `--quiet` / `-q`.
+**Sequential mode** — one model at a time with live token display:
+```
+🏛️ Conclave — standard · 3 members
+  Phase 1 — Independent drafts (streaming sequential)...
+    🏠 🟣 Claude — local (Claude Code)
+    ⟳ 🔵 Gemini — streaming...
+      PostgreSQL is better because of ACID transactions and...
+    ✅ 🔵 Gemini — 3.2s
+    ⟳ 🟢 GPT — streaming...
+      Consider a hybrid approach with PostgreSQL as your...
+    ✅ 🟢 GPT — 4.1s
+  Done in 7.3s
+```
+
+Configure in `.env`:
+```bash
+CONCLAVE_STREAM=true              # Enable streaming (default: true)
+CONCLAVE_STREAM_SEQUENTIAL=false  # Sequential mode (default: false)
+```
+
+Set `CONCLAVE_STREAM=false` to disable streaming entirely and use the standard request/response flow. JSON output on stdout remains clean in all modes. Suppress stderr with `--quiet` / `-q`.
 
 ## Multi-Turn Sessions
 
@@ -403,7 +427,7 @@ Delay formula: `base_delay * 2^attempt + random(0, 0.5)s` jitter to avoid thunde
 
 ## Testing
 
-223 tests with zero API calls (all external calls mocked):
+244 tests with zero API calls (all external calls mocked):
 
 ```bash
 pip install -e ".[dev]"    # one-time setup (installs pytest + httpx)
@@ -420,6 +444,7 @@ python3 -m pytest tests/ -v
 | `test_voting.py` | 16 | `parse_vote_response` (clean/fenced/bare JSON, invalid, missing letters, normalization, floats), `aggregate_votes` (basic, errors, consensus strength, 3 voters), `build_vote_prompt`, `votes_to_ranking_fallback` |
 | `test_dialogue.py` | 16 | `detect_stance` (converge/maintain/update/unknown), `build_round_prompt`, `check_convergence`, `extract_critiques_for_model`, `run_dialogue_rounds` (correct rounds, early termination, mid-round failure, max cap, vote combo), `get_max_rounds` |
 | `test_bias.py` | 14 | `load_bias_data` (missing/valid/corrupt), `save_bias_data`, `record_vote_run` (append, tracking disabled), `is_tracking_enabled`, `compute_metrics` (empty, single run, most contested, multi-mode, per-model stats) |
+| `test_streaming.py` | 21 | SSE line parsing, Anthropic/OpenAI/Gemini stream parsing, `stream_model` routing, progress streaming display, orchestrator integration (stream=false fallback, sequential, parallel, local members) |
 
 ## CLI Reference
 
@@ -458,16 +483,16 @@ conclave/
 │   └── conclave/           ← Core package (1 dependency: httpx)
 │       ├── __init__.py     ← Public API: run_conclave, load_config, doctor, estimate_cost, scoring, voting, dialogue, bias
 │       ├── config.py       ← .env loading, member discovery, templates
-│       ├── providers.py    ← HTTP retry, Anthropic/Gemini/OpenAI/OpenRouter callers
+│       ├── providers.py    ← HTTP retry, Anthropic/Gemini/OpenAI/OpenRouter callers + SSE streaming
 │       ├── ranking.py      ← Ranking extraction, aggregation, critique prompts
 │       ├── voting.py       ← Quorum voting (point distribution, aggregation)
 │       ├── dialogue.py     ← Multi-round dialogue (convergence detection)
 │       ├── bias.py         ← Bias tracking & impartiality metrics
 │       ├── sessions.py     ← Multi-turn session store and context building
-│       ├── progress.py     ← Real-time stderr progress reporting
+│       ├── progress.py     ← Real-time stderr progress reporting + streaming display
 │       ├── scoring.py      ← EMA-based model scoring, weights, and leaderboard
 │       ├── cost.py         ← Pricing data and cost estimation (supports --vote, --rounds)
-│       ├── orchestrator.py ← Phase 1/2 orchestration, voting, dialogue, run_conclave, doctor
+│       ├── orchestrator.py ← Phase 1/2 orchestration, voting, dialogue, streaming dispatch, run_conclave, doctor
 │       └── cli.py          ← argparse, pretty printing, main()
 ├── tests/
 │   ├── conftest.py         ← sys.path setup for imports
@@ -478,7 +503,8 @@ conclave/
 │   ├── test_orchestrator.py← Phase 1/2 orchestration, run_conclave, doctor, two-pass flow (23 tests)
 │   ├── test_voting.py      ← Vote parsing, aggregation, consensus strength (16 tests)
 │   ├── test_dialogue.py    ← Stance detection, rounds, convergence, max cap (16 tests)
-│   └── test_bias.py        ← Bias data I/O, metrics computation, tracking toggle (14 tests)
+│   ├── test_bias.py        ← Bias data I/O, metrics computation, tracking toggle (14 tests)
+│   └── test_streaming.py   ← SSE parsing, stream routing, progress display, orchestrator integration (21 tests)
 └── README.md
 
 ~/.config/conclave/
@@ -530,7 +556,8 @@ PRs welcome! Ideas:
 - [x] Quorum voting — point-based voting with consensus strength (`--vote`)
 - [x] Multi-round dialogue — iterative refinement with convergence detection (`--rounds N`)
 - [x] Bias tracking — per-model voting patterns and impartiality metrics (`bias` command)
-- [x] Test suite — ranking, retry, orchestration, sessions, scoring, voting, dialogue, bias (223 tests, pytest)
+- [x] Real-time streaming — SSE token streaming for all providers, parallel + sequential modes
+- [x] Test suite — ranking, retry, orchestration, sessions, scoring, voting, dialogue, bias, streaming (244 tests, pytest)
 - [x] `pyproject.toml` — installable package with `pip install`, CLI entry point, optional deps
 - [x] HTTP connection pooling — shared `httpx.AsyncClient` across all API calls in a session
 - [x] Null content handling — safe extraction when APIs return `content: null` (reasoning models)
